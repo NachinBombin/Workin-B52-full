@@ -11,10 +11,10 @@ net.Receive("BombinB52_ManualSpawn", function(len, ply)
         filter = ply,
     })
 
-    local centerPos = tr.Hit and tr.HitPos or (ply:GetPos() + Vector(0, 0, 100))
+    local centerPos = tr.Hit and tr.HitPos or (ply:GetPos() + Vector(0,0,100))
     local callDir   = ply:EyeAngles():Forward()
     callDir.z = 0
-    if callDir:LengthSqr() <= 1 then callDir = Vector(1, 0, 0) end
+    if callDir:LengthSqr()<=1 then callDir=Vector(1,0,0) end
     callDir:Normalize()
 
     if not scripted_ents.GetStored("ent_bombin_b52") then
