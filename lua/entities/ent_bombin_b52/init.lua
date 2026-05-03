@@ -1,8 +1,10 @@
 AddCSLuaFile("cl_init.lua")
+AddCSLuaFile("cl_trailsystem.lua")
 AddCSLuaFile("shared.lua")
 include("shared.lua")
 
-local MODEL_YAW_OFFSET    = 0
+local MODEL_YAW_OFFSET    = -90   -- B-52 model nose points +X, GMod forward is +Y
+
 local ROLL_SUSTAINED_GAIN = 2.2
 local ROLL_TRANSIENT_GAIN = 55.0
 local ROLL_MAX            = 22.0
@@ -10,8 +12,8 @@ local ROLL_LERP_IN        = 0.08
 local ROLL_LERP_OUT       = 0.012
 
 local ENGINE_LOOP_SOUND  = "sound/b52/b52.wav"
-local SOUNDS_ATGM_IGNITE = { "ATGM.wav","ATGM2.wav","ATGM3.wav","ATGM4.wav" }
-local SOUNDS_LAUNCH      = { "launch1.wav","launch2.wav" }
+local SOUNDS_ATGM_IGNITE = { "ATGM.wav", "ATGM2.wav", "ATGM3.wav", "ATGM4.wav" }
+local SOUNDS_LAUNCH      = { "launch1.wav", "launch2.wav" }
 local SOUND_ROCKET_IDLE  = "rocket_idle.wav"
 
 local CFG_WeaponWindow       = 10
@@ -28,11 +30,11 @@ local CFG_MaxHP              = 450
 
 util.AddNetworkString("bombin_b52_damage_tier")
 
-local function CalcTier(hp,maxHP)
-    local f=hp/maxHP
-    if f>0.66 then return 0 elseif f>0.33 then return 1 elseif f>0 then return 2 else return 3 end
+local function CalcTier(hp, maxHP)
+    local f = hp / maxHP
+    if f > 0.66 then return 0 elseif f > 0.33 then return 1 elseif f > 0 then return 2 else return 3 end
 end
-local function BroadcastTier(ent,tier)
+local function BroadcastTier(ent, tier)
     net.Start("bombin_b52_damage_tier") net.WriteUInt(ent:EntIndex(),16) net.WriteUInt(tier,2) net.Broadcast()
 end
 
@@ -44,43 +46,42 @@ function ENT:Initialize()
     self.OrbitRadius  = self:GetVar("OrbitRadius",  4200)
     self.SkyHeightAdd = self:GetVar("SkyHeightAdd", 7000)
 
-    self.MaxHP              = CFG_MaxHP
-    self.WeaponWindow       = CFG_WeaponWindow
-    self.FadeDuration       = CFG_FadeDuration
-    self.S8_Delay           = CFG_S8_Delay
-    self.S8_Count           = CFG_S8_Count
-    self.S8_Scatter         = CFG_S8_Scatter
+    self.MaxHP           = CFG_MaxHP
+    self.FadeDuration    = CFG_FadeDuration
+    self.WeaponWindow    = CFG_WeaponWindow
+    self.S8_Delay        = CFG_S8_Delay
+    self.S8_Count        = CFG_S8_Count
+    self.S8_Scatter      = CFG_S8_Scatter
     self.S8_MuzzlePoints    = CFG_S8_MuzzlePoints
     self.VIKHR_Delay        = CFG_VIKHR_Delay
     self.VIKHR_Count        = CFG_VIKHR_Count
     self.VIKHR_Scatter      = CFG_VIKHR_Scatter
     self.VIKHR_MuzzlePoints = CFG_VIKHR_MuzzlePoints
 
-    if self.CallDir:LengthSqr()<=1 then self.CallDir=Vector(1,0,0) end
-    self.CallDir.z=0 self.CallDir:Normalize()
+    if self.CallDir:LengthSqr() <= 1 then self.CallDir = Vector(1,0,0) end
+    self.CallDir.z = 0
+    self.CallDir:Normalize()
 
     local ground = self:FindGround(self.CenterPos)
-    if ground==-1 then
-        -- TB-2 behaviour: remove on FindGround failure.
-        -- But B-52 is called at very high altitude; use caller Z as fallback instead.
-        ground = self.CenterPos.z
-    end
+    if ground == -1 then ground = self.CenterPos.z end  -- B-52 high-alt fallback
 
     self.sky       = ground + self.SkyHeightAdd
     self.DieTime   = CurTime() + self.Lifetime
     self.SpawnTime = CurTime()
 
-    self.OrbitDirection = (math.random(2)==1) and 1 or -1
-    self.OrbitTangent   = self.CallDir:Angle():Right() * self.OrbitDirection
+    self.OrbitDirection = (math.random(2) == 1) and 1 or -1
 
-    self.RadialGain   = 0.42
-    self.SkyAvoidGain = 0.65
-    self.MaxTurnRate  = 28
-    self.PrevTurnRate = 0
+    -- Compute tangent and spawn offset exactly as AN-71
+    local right   = Vector(-self.CallDir.y, self.CallDir.x, 0)
+    local tangent = Vector(right.x * self.OrbitDirection, right.y * self.OrbitDirection, 0)
+    tangent:Normalize()
 
-    local spawnOffset = self.OrbitTangent * (-self.OrbitRadius * math.Rand(0.55,0.95))
-    local spawnPos    = self.CenterPos + spawnOffset
-    spawnPos          = Vector(spawnPos.x, spawnPos.y, self.sky)
+    local spawnOffset = tangent * (-self.OrbitRadius * math.Rand(0.55, 0.95))
+    local spawnPos    = Vector(
+        self.CenterPos.x + spawnOffset.x,
+        self.CenterPos.y + spawnOffset.y,
+        self.sky
+    )
     if not util.IsInWorld(spawnPos) then
         spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, self.sky)
     end
@@ -95,27 +96,28 @@ function ENT:Initialize()
     self:SetCollisionGroup(COLLISION_GROUP_INTERACTIVE_DEBRIS)
     self:SetPos(spawnPos)
     self:SetBodygroup(1, 1)
-
     self:SetRenderMode(RENDERMODE_TRANSALPHA)
     self:SetColor(Color(255,255,255,0))
 
     self:SetNWInt("HP",    self.MaxHP)
     self:SetNWInt("MaxHP", self.MaxHP)
 
-    self.flightYaw = self.OrbitTangent:Angle().y
-    self.ang       = Angle(0, self.flightYaw+MODEL_YAW_OFFSET, 0)
-    self:SetAngles(self.ang)
-
-    self.JitterPhase      = math.Rand(0,math.pi*2)
-    self.JitterAmplitude  = 8
-    self.AltDriftCurrent  = self.sky
-    self.AltDriftTarget   = self.sky
-    self.AltDriftNextPick = CurTime()+math.Rand(10,25)
-    self.AltDriftRange    = 500
-    self.AltDriftLerp     = 0.002
-
+    self.flightYaw    = tangent:Angle().y
+    self.PrevTurnRate = 0
     self.SmoothedRoll  = 0
     self.SmoothedPitch = 0
+    self.ang = Angle(0, self.flightYaw + MODEL_YAW_OFFSET, 0)
+
+    self.AltDriftCurrent  = self.sky
+    self.AltDriftTarget   = self.sky
+    self.AltDriftNextPick = CurTime() + math.Rand(12, 30)
+    self.AltDriftRange    = 500
+    self.AltDriftLerp     = 0.001
+    self.JitterPhase      = math.Rand(0, math.pi * 2)
+    self.JitterAmplitude  = 8
+
+    self.RadialGain   = 0.5
+    self.MaxTurnRate  = 28
 
     self.IsTumbling        = false
     self.TumbleStartTime   = 0
@@ -131,67 +133,71 @@ function ENT:Initialize()
     if IsValid(self.PhysObj) then
         self.PhysObj:Wake()
         self.PhysObj:EnableGravity(false)
+        self.PhysObj:SetAngles(self.ang)
     end
 
-    self.EngineLoop = CreateSound(game.GetWorld(), ENGINE_LOOP_SOUND)
+    self.EngineLoop = CreateSound(self, ENGINE_LOOP_SOUND)
     if self.EngineLoop then
-        self.EngineLoop:SetSoundLevel(0)
-        self.EngineLoop:ChangePitch(85,0)
-        self.EngineLoop:ChangeVolume(0.4,0)
+        self.EngineLoop:SetSoundLevel(80)
+        self.EngineLoop:ChangePitch(100, 0)
+        self.EngineLoop:ChangeVolume(1.0, 0)
         self.EngineLoop:Play()
     end
 
     self.CurrentWeapon   = nil
     self.WeaponWindowEnd = 0
-    self.S8_ShotsFired=0   self.S8_NextShot=0   self.S8_MuzzleIndex=1
-    self.VIKHR_ShotsFired=0 self.VIKHR_NextShot=0 self.VIKHR_MuzzleIndex=1
+    self.S8_ShotsFired   = 0   self.S8_NextShot   = 0   self.S8_MuzzleIndex   = 1
+    self.VIKHR_ShotsFired = 0  self.VIKHR_NextShot = 0  self.VIKHR_MuzzleIndex = 1
 
-    self:Debug("B-52 spawned at "..tostring(spawnPos).." sky="..self.sky.." OrbitDirection="..self.OrbitDirection)
+    self:Debug("B-52 spawned at "..tostring(spawnPos).." sky="..self.sky.." OrbitDir="..self.OrbitDirection)
 end
 
 function ENT:OnTakeDamage(dmginfo)
     if self.IsDestroyed then return end
     if dmginfo:IsDamageType(DMG_CRUSH) then return end
-    local hp=self:GetNWInt("HP",self.MaxHP)-dmginfo:GetDamage()
-    self:SetNWInt("HP",hp)
-    local tier=CalcTier(hp,self.MaxHP)
-    if tier~=self.DamageTier then self.DamageTier=tier BroadcastTier(self,tier) end
-    if hp<=0 then self:DestroyUAV() end
+    local hp = self:GetNWInt("HP", self.MaxHP) - dmginfo:GetDamage()
+    self:SetNWInt("HP", hp)
+    local tier = CalcTier(hp, self.MaxHP)
+    if tier ~= self.DamageTier then self.DamageTier = tier BroadcastTier(self, tier) end
+    if hp <= 0 then self:DestroyUAV() end
 end
 
 function ENT:StartTumble()
-    self.IsTumbling=true self.TumbleStartTime=CurTime() self.TumbleCrashed=false
-    local gnd=self:FindGround(self:GetPos())
-    if gnd~=-1 then self.TumbleGroundZ=gnd end
-    local fwd=Angle(0,self.flightYaw,0):Forward()
-    self.TumbleVelocity=Vector(fwd.x*(self.Speed or 260),fwd.y*(self.Speed or 260),-200)
-    local sign=function() return (math.random(2)==1) and 1 or -1 end
-    self.TumbleAngVelocity=Vector(math.Rand(80,200)*sign(),math.Rand(20,80)*sign(),math.Rand(150,400)*sign())
-    local pos=self:GetPos()
-    local ed=EffectData() ed:SetOrigin(pos) ed:SetScale(4) ed:SetMagnitude(4) ed:SetRadius(400)
-    util.Effect("500lb_air",ed,true,true)
-    sound.Play("ambient/explosions/explode_4.wav",pos,135,95,1.0)
+    self.IsTumbling = true self.TumbleStartTime = CurTime() self.TumbleCrashed = false
+    local gnd = self:FindGround(self:GetPos())
+    if gnd ~= -1 then self.TumbleGroundZ = gnd end
+    local fwd = Angle(0, self.flightYaw, 0):Forward()
+    self.TumbleVelocity = Vector(fwd.x*(self.Speed or 260), fwd.y*(self.Speed or 260), -200)
+    local sign = function() return (math.random(2)==1) and 1 or -1 end
+    self.TumbleAngVelocity = Vector(math.Rand(80,200)*sign(), math.Rand(20,80)*sign(), math.Rand(150,400)*sign())
+    local pos = self:GetPos()
+    local ed = EffectData() ed:SetOrigin(pos) ed:SetScale(4) ed:SetMagnitude(4) ed:SetRadius(400)
+    util.Effect("500lb_air", ed, true, true)
+    sound.Play("ambient/explosions/explode_4.wav", pos, 135, 95, 1.0)
 end
 
 function ENT:CrashExplode()
     if self.TumbleCrashed then return end
-    self.TumbleCrashed=true
-    local pos=self:GetPos()
-    local ed1=EffectData() ed1:SetOrigin(pos) ed1:SetScale(6) ed1:SetMagnitude(6) ed1:SetRadius(600) util.Effect("HelicopterMegaBomb",ed1,true,true)
-    local ed2=EffectData() ed2:SetOrigin(pos) ed2:SetScale(5) ed2:SetMagnitude(5) ed2:SetRadius(500) util.Effect("500lb_air",ed2,true,true)
-    local ed3=EffectData() ed3:SetOrigin(pos+Vector(0,0,80)) ed3:SetScale(4) ed3:SetMagnitude(4) ed3:SetRadius(400) util.Effect("500lb_air",ed3,true,true)
-    sound.Play("ambient/explosions/explode_8.wav",pos,140,90,1.0)
-    sound.Play("weapon_AWP.Single",pos,145,60,1.0)
-    util.BlastDamage(self,self,pos,400,200)
+    self.TumbleCrashed = true
+    local pos = self:GetPos()
+    local e1=EffectData() e1:SetOrigin(pos) e1:SetScale(6) e1:SetMagnitude(6) e1:SetRadius(600) util.Effect("HelicopterMegaBomb",e1,true,true)
+    local e2=EffectData() e2:SetOrigin(pos) e2:SetScale(5) e2:SetMagnitude(5) e2:SetRadius(500) util.Effect("500lb_air",e2,true,true)
+    local e3=EffectData() e3:SetOrigin(pos+Vector(0,0,80)) e3:SetScale(4) e3:SetMagnitude(4) e3:SetRadius(400) util.Effect("500lb_air",e3,true,true)
+    sound.Play("ambient/explosions/explode_8.wav", pos, 140, 90, 1.0)
+    sound.Play("weapon_AWP.Single", pos, 145, 60, 1.0)
+    util.BlastDamage(self, self, pos, 400, 200)
     self:Remove()
 end
 
 function ENT:DestroyUAV()
     if self.IsDestroyed then return end
-    self.IsDestroyed=true
-    if self.EngineLoop then self.EngineLoop:ChangeVolume(0,0.3) timer.Simple(0.4,function() if self.EngineLoop then self.EngineLoop:Stop() end end) end
+    self.IsDestroyed = true
+    if self.EngineLoop then
+        self.EngineLoop:ChangeVolume(0, 0.3)
+        timer.Simple(0.4, function() if self.EngineLoop then self.EngineLoop:Stop() end end)
+    end
     self:StartTumble()
-    timer.Simple(12,function() if IsValid(self) then self:CrashExplode() end end)
+    timer.Simple(12, function() if IsValid(self) then self:CrashExplode() end end)
 end
 
 function ENT:Debug(msg) print("[Bombin B-52] "..tostring(msg)) end
@@ -200,23 +206,22 @@ function ENT:Think()
     if not self.DieTime or not self.SpawnTime then
         self:NextThink(CurTime()+0.1) return true
     end
-    local ct=CurTime()
+    local ct = CurTime()
     if self.IsTumbling and not self.TumbleCrashed then
-        local pos=self:GetPos()
-        local groundZ=self.TumbleGroundZ or -16384
-        if pos.z<=groundZ+150 then self:CrashExplode() return end
-        local tr=util.TraceLine({start=pos,endpos=pos+Vector(0,0,-200),filter=self})
+        local pos = self:GetPos()
+        if pos.z <= (self.TumbleGroundZ or -16384)+150 then self:CrashExplode() return end
+        local tr = util.TraceLine({start=pos, endpos=pos+Vector(0,0,-200), filter=self})
         if tr.HitWorld then self:CrashExplode() return end
         self:NextThink(ct+0.05) return true
     end
-    if ct>=self.DieTime then self:Remove() return end
-    if not IsValid(self.PhysObj) then self.PhysObj=self:GetPhysicsObject() end
+    if ct >= self.DieTime then self:Remove() return end
+    if not IsValid(self.PhysObj) then self.PhysObj = self:GetPhysicsObject() end
     if IsValid(self.PhysObj) and self.PhysObj:IsAsleep() then self.PhysObj:Wake() end
-    local age=ct-self.SpawnTime
-    local left=self.DieTime-ct
-    local alpha=255
-    if age<self.FadeDuration then alpha=math.Clamp(255*(age/self.FadeDuration),0,255)
-    elseif left<self.FadeDuration then alpha=math.Clamp(255*(left/self.FadeDuration),0,255) end
+    local age  = ct - self.SpawnTime
+    local left = self.DieTime - ct
+    local alpha = 255
+    if age  < self.FadeDuration then alpha = math.Clamp(255*(age /self.FadeDuration),0,255)
+    elseif left < self.FadeDuration then alpha = math.Clamp(255*(left/self.FadeDuration),0,255) end
     self:SetColor(Color(255,255,255,math.Round(alpha)))
     self:HandleWeaponWindow(ct)
     self:NextThink(ct)
@@ -225,125 +230,160 @@ end
 
 function ENT:PhysicsUpdate(phys)
     if not self.DieTime or not self.sky then return end
+
     if self.IsTumbling then
         if self.TumbleCrashed then return end
-        local dt=engine.TickInterval()
-        self.TumbleVelocity.z=self.TumbleVelocity.z+physenv.GetGravity().z*dt
-        local pos=self:GetPos()
-        local newPos=pos+self.TumbleVelocity*dt
-        local av=self.TumbleAngVelocity
-        self.ang=Angle(self.ang.p+av.x*dt,self.ang.y+av.y*dt,self.ang.r+av.z*dt)
+        local dt = engine.TickInterval()
+        self.TumbleVelocity.z = self.TumbleVelocity.z + physenv.GetGravity().z * dt
+        local pos    = self:GetPos()
+        local newPos = pos + self.TumbleVelocity * dt
+        local av     = self.TumbleAngVelocity
+        self.ang = Angle(self.ang.p+av.x*dt, self.ang.y+av.y*dt, self.ang.r+av.z*dt)
         self:SetPos(newPos) self:SetAngles(self.ang)
         if IsValid(phys) then phys:SetPos(newPos) phys:SetAngles(self.ang) end
         return
     end
-    if CurTime()>=self.DieTime then self:Remove() return end
-    local pos=self:GetPos()
-    local dt=engine.TickInterval()
-    if CurTime()>=self.AltDriftNextPick then
-        self.AltDriftTarget=self.sky-math.Rand(0,self.AltDriftRange)
-        self.AltDriftNextPick=CurTime()+math.Rand(10,25)
+
+    if CurTime() >= self.DieTime then self:Remove() return end
+
+    local pos = self:GetPos()
+    local dt  = engine.TickInterval()
+
+    -- Altitude drift
+    if CurTime() >= self.AltDriftNextPick then
+        self.AltDriftTarget   = self.sky - math.Rand(0, self.AltDriftRange)
+        self.AltDriftNextPick = CurTime() + math.Rand(12, 30)
     end
-    self.AltDriftCurrent=Lerp(self.AltDriftLerp,self.AltDriftCurrent,self.AltDriftTarget)
-    self.JitterPhase=self.JitterPhase+0.03
-    local liveAlt=math.Clamp(
-        self.AltDriftCurrent+math.sin(self.JitterPhase)*self.JitterAmplitude,
-        self.sky-self.AltDriftRange, self.sky
+    self.AltDriftCurrent = Lerp(self.AltDriftLerp, self.AltDriftCurrent, self.AltDriftTarget)
+    self.JitterPhase = self.JitterPhase + 0.02
+    local liveAlt = math.Clamp(
+        self.AltDriftCurrent + math.sin(self.JitterPhase) * self.JitterAmplitude,
+        self.sky - self.AltDriftRange, self.sky
     )
-    local flatPos=Vector(pos.x,pos.y,0)
-    local flatCenter=Vector(self.CenterPos.x,self.CenterPos.y,0)
-    local toCenter=flatCenter-flatPos
-    local dist=toCenter:Length()
-    local radialDir=(dist>1) and (toCenter/dist) or Vector(0,0,0)
-    local tangentDir=Vector(-radialDir.y,radialDir.x,0)*self.OrbitDirection
-    if tangentDir:LengthSqr()<=0.001 then tangentDir=Angle(0,self.flightYaw,0):Forward() tangentDir.z=0 end
+
+    -- Orbit steering (AN-71 cross-product method)
+    local flatPos    = Vector(pos.x, pos.y, 0)
+    local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
+    local toCenter   = flatCenter - flatPos
+    local dist       = toCenter:Length()
+
+    local radialDir  = (dist > 1) and (toCenter / dist) or Vector(0,0,0)
+    local tangentDir = Vector(
+        -radialDir.y * self.OrbitDirection,
+         radialDir.x * self.OrbitDirection,
+        0
+    )
+    if tangentDir:LengthSqr() < 0.001 then
+        local fb = Angle(0, self.flightYaw, 0):Forward()
+        tangentDir = Vector(fb.x, fb.y, 0)
+    end
     tangentDir:Normalize()
-    local radialError=0
-    if self.OrbitRadius>0 then radialError=math.Clamp((dist-self.OrbitRadius)/self.OrbitRadius,-1,1) end
-    local desiredDir=tangentDir+radialDir*radialError*self.RadialGain
-    local fwdProbe=Angle(0,self.flightYaw,0):Forward()
-    local probeDist=math.max(1000,self.Speed*5)
-    local trFwd=util.QuickTrace(pos,fwdProbe*probeDist,self)
-    local trLeft=util.QuickTrace(pos,fwdProbe:Angle():Right()*-700+fwdProbe*500,self)
-    local trRight=util.QuickTrace(pos,fwdProbe:Angle():Right()*700+fwdProbe*500,self)
-    local skyAvoid=Vector(0,0,0)
-    if trFwd.HitSky   then skyAvoid=skyAvoid-fwdProbe end
-    if trLeft.HitSky  then skyAvoid=skyAvoid+fwdProbe:Angle():Right() end
-    if trRight.HitSky then skyAvoid=skyAvoid-fwdProbe:Angle():Right() end
-    skyAvoid.z=0
-    if skyAvoid:LengthSqr()>0.001 then skyAvoid:Normalize() desiredDir=desiredDir+skyAvoid*self.SkyAvoidGain end
-    desiredDir.z=0
-    if desiredDir:LengthSqr()<=0.001 then desiredDir=tangentDir end
-    desiredDir:Normalize()
-    local desiredYaw=desiredDir:Angle().y
-    local yawDiff=math.NormalizeAngle(desiredYaw-self.flightYaw)
-    local maxStep=self.MaxTurnRate*dt
-    local turnRate=math.Clamp(yawDiff/dt,-self.MaxTurnRate,self.MaxTurnRate)
-    self.flightYaw=self.flightYaw+math.Clamp(yawDiff,-maxStep,maxStep)
-    local turnRateDelta=turnRate-self.PrevTurnRate
-    self.PrevTurnRate=turnRate
-    local sustained=math.Clamp(-turnRate*ROLL_SUSTAINED_GAIN,-18,18)
-    local transient=math.Clamp(-turnRateDelta*ROLL_TRANSIENT_GAIN,-10,10)
-    local rollTarget=math.Clamp(sustained+transient,-ROLL_MAX,ROLL_MAX)
-    local building=(rollTarget*self.SmoothedRoll>=0) and (math.abs(rollTarget)>math.abs(self.SmoothedRoll))
-    self.SmoothedRoll=Lerp(building and ROLL_LERP_IN or ROLL_LERP_OUT,self.SmoothedRoll,rollTarget)
-    local fwdDir=Angle(0,self.flightYaw,0):Forward()
-    local climbDelta=math.Clamp((liveAlt-pos.z)/400,-1,1)
-    self.SmoothedPitch=Lerp(0.04,self.SmoothedPitch,math.Clamp(climbDelta*6,-8,8))
-    self.ang=Angle(self.SmoothedPitch,self.flightYaw+MODEL_YAW_OFFSET,self.SmoothedRoll)
-    local newPos=pos+fwdDir*self.Speed*dt
-    newPos.z=Lerp(0.08,pos.z,liveAlt)
+
+    local radialError = 0
+    if self.OrbitRadius > 0 then
+        radialError = math.Clamp((dist - self.OrbitRadius) / self.OrbitRadius, -1, 1)
+    end
+
+    local desired2 = Vector(
+        tangentDir.x + radialDir.x * radialError * self.RadialGain,
+        tangentDir.y + radialDir.y * radialError * self.RadialGain,
+        0
+    )
+    if desired2:LengthSqr() < 0.001 then desired2 = tangentDir end
+    desired2:Normalize()
+
+    local fwdAngle = Angle(0, self.flightYaw, 0)
+    local fwd3     = fwdAngle:Forward()
+    local fwd2     = Vector(fwd3.x, fwd3.y, 0)
+    fwd2:Normalize()
+
+    -- AN-71 cross-product turn rate
+    local cross   = fwd2.x * desired2.y - fwd2.y * desired2.x
+    local dot     = fwd2.x * desired2.x + fwd2.y * desired2.y
+    local urgency = (1 - dot) * 0.5
+    local turnRate = math.Clamp(cross * urgency * self.MaxTurnRate * 2,
+                                -self.MaxTurnRate, self.MaxTurnRate)
+
+    self.flightYaw = self.flightYaw + turnRate * dt
+
+    local turnRateDelta = turnRate - self.PrevTurnRate
+    self.PrevTurnRate   = turnRate
+
+    -- Roll: positive turnRate = turning right = bank right (positive roll in GMod)
+    -- AN-71 uses +turnRate * gain (no sign flip)
+    local sustained  = math.Clamp(turnRate      * ROLL_SUSTAINED_GAIN, -20, 20)
+    local transient  = math.Clamp(turnRateDelta * ROLL_TRANSIENT_GAIN, -12, 12)
+    local rollTarget = math.Clamp(sustained + transient, -ROLL_MAX, ROLL_MAX)
+
+    local building = (rollTarget * self.SmoothedRoll >= 0)
+                     and (math.abs(rollTarget) > math.abs(self.SmoothedRoll))
+    self.SmoothedRoll = Lerp(building and ROLL_LERP_IN or ROLL_LERP_OUT, self.SmoothedRoll, rollTarget)
+
+    local climbDelta   = math.Clamp((liveAlt - pos.z) / 400, -1, 1)
+    local targetPitch  = math.Clamp(climbDelta * 6, -8, 8)
+    self.SmoothedPitch = Lerp(0.03, self.SmoothedPitch, targetPitch)
+
+    self.ang = Angle(
+        self.SmoothedPitch,
+        self.flightYaw + MODEL_YAW_OFFSET,
+        self.SmoothedRoll
+    )
+
+    local newPos = pos + fwdAngle:Forward() * self.Speed * dt
+    newPos.z     = Lerp(0.07, pos.z, liveAlt)
+
     if not util.IsInWorld(newPos) then
-        self:Debug("OOB guard fired")
-        local toC=flatCenter-Vector(pos.x,pos.y,0) toC.z=0
-        if toC:LengthSqr()<0.001 then toC=Vector(-fwdProbe.x,-fwdProbe.y,0) end
+        self:Debug("OOB guard - steering to center")
+        local toC = flatCenter - Vector(pos.x, pos.y, 0) toC.z = 0
+        if toC:LengthSqr() < 0.001 then toC = Vector(-fwd2.x, -fwd2.y, 0) end
         toC:Normalize()
-        self.flightYaw=toC:Angle().y
-        self.ang=Angle(self.SmoothedPitch,self.flightYaw+MODEL_YAW_OFFSET,self.SmoothedRoll)
-        self:SetPos(pos) self:SetAngles(self.ang) return
+        local sCross = fwd2.x*toC.y - fwd2.y*toC.x
+        self.flightYaw = self.flightYaw
+            + math.Clamp(sCross * self.MaxTurnRate, -self.MaxTurnRate, self.MaxTurnRate) * dt
+        self:SetPos(pos)
+        self:SetAngles(Angle(self.SmoothedPitch, self.flightYaw+MODEL_YAW_OFFSET, self.SmoothedRoll))
+        return
     end
-    self:SetPos(newPos) self:SetAngles(self.ang)
-    if not self:IsInWorld() then
-        self:Debug("Out of world - center recovery")
-        self:SetPos(Vector(self.CenterPos.x,self.CenterPos.y,self.sky))
-    end
+
+    self:SetPos(newPos)
+    self:SetAngles(self.ang)
 end
 
 function ENT:GetPrimaryTarget()
-    local closest,closestDist=nil,math.huge
-    for _,ply in ipairs(player.GetAll()) do
+    local closest, closestDist = nil, math.huge
+    for _, ply in ipairs(player.GetAll()) do
         if not IsValid(ply) or not ply:Alive() then continue end
-        local d=ply:GetPos():DistToSqr(self.CenterPos)
-        if d<closestDist then closestDist=d closest=ply end
+        local d = ply:GetPos():DistToSqr(self.CenterPos)
+        if d < closestDist then closestDist = d closest = ply end
     end
     return closest
 end
 
 function ENT:GetTargetGroundPos()
-    local target=self:GetPrimaryTarget()
+    local target = self:GetPrimaryTarget()
     if IsValid(target) then return target:GetPos() end
-    local tr=util.QuickTrace(Vector(self.CenterPos.x,self.CenterPos.y,self.sky),Vector(0,0,-30000),self)
+    local tr = util.QuickTrace(Vector(self.CenterPos.x, self.CenterPos.y, self.sky), Vector(0,0,-30000), self)
     return tr.HitPos
 end
 
 function ENT:GetMuzzleWorldPos(localPoint) return self:LocalToWorld(localPoint) end
 
 function ENT:SpawnMuzzleFX(worldPos)
-    local ed=EffectData() ed:SetOrigin(worldPos) ed:SetAngles(self:GetAngles()) ed:SetEntity(self)
-    util.Effect("gred_particle_aircraft_muzzle",ed,true,true)
+    local ed = EffectData() ed:SetOrigin(worldPos) ed:SetAngles(self:GetAngles()) ed:SetEntity(self)
+    util.Effect("gred_particle_aircraft_muzzle", ed, true, true)
 end
 
 function ENT:HandleWeaponWindow(ct)
-    if not self.CurrentWeapon or ct>=self.WeaponWindowEnd then self:PickNewWeapon(ct) end
-    if self.CurrentWeapon=="s8_salvo" then self:UpdateS8Salvo(ct)
-    elseif self.CurrentWeapon=="vikhr" then self:UpdateVikhr(ct) end
+    if not self.CurrentWeapon or ct >= self.WeaponWindowEnd then self:PickNewWeapon(ct) end
+    if self.CurrentWeapon == "s8_salvo" then self:UpdateS8Salvo(ct)
+    elseif self.CurrentWeapon == "vikhr" then self:UpdateVikhr(ct) end
 end
 
 function ENT:PickNewWeapon(ct)
-    self.CurrentWeapon=(math.random(1,2)==1) and "s8_salvo" or "vikhr"
-    self.WeaponWindowEnd=ct+self.WeaponWindow
+    self.CurrentWeapon = (math.random(1,2)==1) and "s8_salvo" or "vikhr"
+    self.WeaponWindowEnd = ct + self.WeaponWindow
     self:Debug("Weapon: "..self.CurrentWeapon)
-    if self.CurrentWeapon=="s8_salvo" then
+    if self.CurrentWeapon == "s8_salvo" then
         self.S8_ShotsFired=0 self.S8_NextShot=ct+0.5 self.S8_MuzzleIndex=1
     else
         self.VIKHR_ShotsFired=0 self.VIKHR_NextShot=ct+1.0 self.VIKHR_MuzzleIndex=1
@@ -351,67 +391,69 @@ function ENT:PickNewWeapon(ct)
 end
 
 function ENT:UpdateS8Salvo(ct)
-    if self.S8_ShotsFired>=self.S8_Count then return end
-    if ct<self.S8_NextShot then return end
-    self.S8_NextShot=ct+self.S8_Delay self.S8_ShotsFired=self.S8_ShotsFired+1
-    local muzzleLocal=self.S8_MuzzlePoints[self.S8_MuzzleIndex]
-    self.S8_MuzzleIndex=(self.S8_MuzzleIndex % #self.S8_MuzzlePoints)+1
-    local muzzlePos=self:GetMuzzleWorldPos(muzzleLocal)
-    local targetPos=self:GetTargetGroundPos()+Vector(math.Rand(-self.S8_Scatter,self.S8_Scatter),math.Rand(-self.S8_Scatter,self.S8_Scatter),0)
-    local dir=targetPos-muzzlePos
-    if dir:LengthSqr()<1 then return end dir:Normalize()
-    local rocket=ents.Create("gb_s8kom_rocket")
+    if self.S8_ShotsFired >= self.S8_Count then return end
+    if ct < self.S8_NextShot then return end
+    self.S8_NextShot = ct + self.S8_Delay  self.S8_ShotsFired = self.S8_ShotsFired + 1
+    local muzzleLocal = self.S8_MuzzlePoints[self.S8_MuzzleIndex]
+    self.S8_MuzzleIndex = (self.S8_MuzzleIndex % #self.S8_MuzzlePoints) + 1
+    local muzzlePos = self:GetMuzzleWorldPos(muzzleLocal)
+    local targetPos = self:GetTargetGroundPos()+Vector(math.Rand(-self.S8_Scatter,self.S8_Scatter),math.Rand(-self.S8_Scatter,self.S8_Scatter),0)
+    local dir = targetPos - muzzlePos
+    if dir:LengthSqr() < 1 then return end dir:Normalize()
+    local rocket = ents.Create("gb_s8kom_rocket")
     if not IsValid(rocket) then self:Debug("gb_s8kom_rocket failed") return end
     rocket:SetPos(muzzlePos) rocket:SetAngles(dir:Angle()) rocket:SetOwner(self) rocket.IsOnPlane=true
     rocket:Spawn() rocket:Activate()
     rocket.Armed=true rocket.ShouldExplode=true
     rocket:Launch() rocket:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
-    local rPhys=rocket:GetPhysicsObject()
-    local uPhys=self:GetPhysicsObject()
-    if IsValid(rPhys) and IsValid(uPhys) then rPhys:AddVelocity(uPhys:GetVelocity()) end
+    local rPhys = rocket:GetPhysicsObject()
+    if IsValid(rPhys) then
+        rPhys:SetVelocity(Angle(0,self.flightYaw,0):Forward() * self.Speed)
+    end
     self:SpawnMuzzleFX(muzzlePos)
-    sound.Play(table.Random(SOUNDS_ATGM_IGNITE),muzzlePos,110,math.random(95,105),1.0)
-    timer.Simple(0.1,function() if IsValid(rocket) then sound.Play(table.Random(SOUNDS_LAUNCH),rocket:GetPos(),105,math.random(95,105),1.0) end end)
-    rocket.IdleSound=CreateSound(rocket,SOUND_ROCKET_IDLE)
+    sound.Play(table.Random(SOUNDS_ATGM_IGNITE), muzzlePos, 110, math.random(95,105), 1.0)
+    timer.Simple(0.1, function() if IsValid(rocket) then sound.Play(table.Random(SOUNDS_LAUNCH), rocket:GetPos(), 105, math.random(95,105), 1.0) end end)
+    rocket.IdleSound = CreateSound(rocket, SOUND_ROCKET_IDLE)
     if rocket.IdleSound then rocket.IdleSound:Play() rocket.IdleSound:ChangePitch(math.random(90,115),0) rocket.IdleSound:ChangeVolume(0.8,0) end
     local oldR=rocket.OnRemove rocket.OnRemove=function(s) if oldR then oldR(s) end if s.IdleSound then s.IdleSound:Stop() end end
     local oldE=rocket.OnExplode rocket.OnExplode=function(s,p,n) if oldE then oldE(s,p,n) end if s.IdleSound then s.IdleSound:Stop() end end
-    constraint.NoCollide(rocket,self,0,0)
-    local ref=rocket timer.Simple(0.5,function() if IsValid(ref) and IsValid(self) then constraint.RemoveConstraints(ref,"NoCollide") end end)
+    constraint.NoCollide(rocket, self, 0, 0)
+    local ref=rocket timer.Simple(0.5, function() if IsValid(ref) and IsValid(self) then constraint.RemoveConstraints(ref,"NoCollide") end end)
 end
 
 function ENT:UpdateVikhr(ct)
-    if self.VIKHR_ShotsFired>=self.VIKHR_Count then return end
-    if ct<self.VIKHR_NextShot then return end
-    self.VIKHR_NextShot=ct+self.VIKHR_Delay self.VIKHR_ShotsFired=self.VIKHR_ShotsFired+1
-    local muzzleLocal=self.VIKHR_MuzzlePoints[self.VIKHR_MuzzleIndex]
-    self.VIKHR_MuzzleIndex=(self.VIKHR_MuzzleIndex % #self.VIKHR_MuzzlePoints)+1
-    local muzzlePos=self:GetMuzzleWorldPos(muzzleLocal)
-    local targetPos=self:GetTargetGroundPos()+Vector(math.Rand(-self.VIKHR_Scatter,self.VIKHR_Scatter),math.Rand(-self.VIKHR_Scatter,self.VIKHR_Scatter),0)
-    local dir=targetPos-muzzlePos
-    if dir:LengthSqr()<1 then return end dir:Normalize()
-    local rocket=ents.Create("gb_9k121_rocket")
+    if self.VIKHR_ShotsFired >= self.VIKHR_Count then return end
+    if ct < self.VIKHR_NextShot then return end
+    self.VIKHR_NextShot = ct + self.VIKHR_Delay  self.VIKHR_ShotsFired = self.VIKHR_ShotsFired + 1
+    local muzzleLocal = self.VIKHR_MuzzlePoints[self.VIKHR_MuzzleIndex]
+    self.VIKHR_MuzzleIndex = (self.VIKHR_MuzzleIndex % #self.VIKHR_MuzzlePoints) + 1
+    local muzzlePos = self:GetMuzzleWorldPos(muzzleLocal)
+    local targetPos = self:GetTargetGroundPos()+Vector(math.Rand(-self.VIKHR_Scatter,self.VIKHR_Scatter),math.Rand(-self.VIKHR_Scatter,self.VIKHR_Scatter),0)
+    local dir = targetPos - muzzlePos
+    if dir:LengthSqr() < 1 then return end dir:Normalize()
+    local rocket = ents.Create("gb_9k121_rocket")
     if not IsValid(rocket) then self:Debug("gb_9k121_rocket failed") return end
     rocket:SetPos(muzzlePos) rocket:SetAngles(dir:Angle()) rocket:SetOwner(self) rocket.IsOnPlane=true
     rocket:Spawn() rocket:Activate()
     rocket.Armed=true rocket.ShouldExplode=true rocket.ShouldExplodeOnImpact=true
     rocket:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
-    local startpos=self:LocalToWorld(self:OBBCenter())
-    local tr=util.TraceHull({start=startpos,endpos=startpos+dir*500000,mins=Vector(-25,-25,-25),maxs=Vector(25,25,25),filter=self})
-    local rPhys=rocket:GetPhysicsObject()
-    local uPhys=self:GetPhysicsObject()
-    if IsValid(rPhys) and IsValid(uPhys) then rPhys:AddVelocity(uPhys:GetVelocity()) end
-    constraint.NoCollide(rocket,self,0,0)
-    local ref=rocket
-    timer.Simple(0.25,function()
+    local startpos = self:LocalToWorld(self:OBBCenter())
+    local tr = util.TraceHull({start=startpos,endpos=startpos+dir*500000,mins=Vector(-25,-25,-25),maxs=Vector(25,25,25),filter=self})
+    local rPhys = rocket:GetPhysicsObject()
+    if IsValid(rPhys) then
+        rPhys:SetVelocity(Angle(0,self.flightYaw,0):Forward() * self.Speed)
+    end
+    constraint.NoCollide(rocket, self, 0, 0)
+    local ref = rocket
+    timer.Simple(0.25, function()
         if not IsValid(ref) then return end
         if tr.Hit then ref.JDAM=true ref.target=tr.Entity ref.targetOffset=IsValid(tr.Entity) and tr.Entity:WorldToLocal(tr.HitPos) or tr.HitPos ref.dropping=true end
         ref.Armed=true ref:Launch() ref:SetCollisionGroup(0)
     end)
     self:SpawnMuzzleFX(muzzlePos)
-    sound.Play(table.Random(SOUNDS_ATGM_IGNITE),muzzlePos,0,100,1.0)
-    timer.Simple(0.1,function() if IsValid(rocket) then sound.Play(table.Random(SOUNDS_LAUNCH),rocket:GetPos(),105,math.random(95,105),1.0) end end)
-    rocket.IdleSound=CreateSound(rocket,SOUND_ROCKET_IDLE)
+    sound.Play(table.Random(SOUNDS_ATGM_IGNITE), muzzlePos, 0, 100, 1.0)
+    timer.Simple(0.1, function() if IsValid(rocket) then sound.Play(table.Random(SOUNDS_LAUNCH), rocket:GetPos(), 105, math.random(95,105), 1.0) end end)
+    rocket.IdleSound = CreateSound(rocket, SOUND_ROCKET_IDLE)
     if rocket.IdleSound then rocket.IdleSound:Play() rocket.IdleSound:ChangePitch(math.random(85,110),0) rocket.IdleSound:ChangeVolume(0.9,0) end
     local oldR=rocket.OnRemove rocket.OnRemove=function(s) if oldR then oldR(s) end if s.IdleSound then s.IdleSound:Stop() end end
     local oldE=rocket.OnExplode
@@ -425,22 +467,23 @@ function ENT:UpdateVikhr(ct)
 end
 
 function ENT:FindGround(centerPos)
-    local startPos=Vector(centerPos.x,centerPos.y,centerPos.z+64)
-    local endPos=Vector(centerPos.x,centerPos.y,-16384)
-    local filterList={self} local maxIter=0
-    while maxIter<100 do
-        local tr=util.TraceLine({start=startPos,endpos=endPos,filter=filterList})
+    local startPos   = Vector(centerPos.x, centerPos.y, centerPos.z+64)
+    local endPos     = Vector(centerPos.x, centerPos.y, -16384)
+    local filterList = {self}
+    local maxIter    = 0
+    while maxIter < 100 do
+        local tr = util.TraceLine({start=startPos, endpos=endPos, filter=filterList})
         if tr.HitWorld then return tr.HitPos.z end
-        if IsValid(tr.Entity) then table.insert(filterList,tr.Entity)
+        if IsValid(tr.Entity) then table.insert(filterList, tr.Entity)
         else break end
-        maxIter=maxIter+1
+        maxIter = maxIter + 1
     end
     return -1
 end
 
 function ENT:OnRemove()
     if self.EngineLoop then
-        self.EngineLoop:ChangeVolume(0,0.5)
-        timer.Simple(0.6,function() if self.EngineLoop then self.EngineLoop:Stop() end end)
+        self.EngineLoop:ChangeVolume(0, 0.5)
+        timer.Simple(0.6, function() if self.EngineLoop then self.EngineLoop:Stop() end end)
     end
 end
