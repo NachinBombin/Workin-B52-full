@@ -1,18 +1,28 @@
--- 5 contrail emitters for B-52 (4 engine pairs + tail)
+-- ============================================================
+-- CONTRAIL SYSTEM  --  ent_bombin_b52
+-- 5 emission points spread across the wing span (X axis).
+-- Model-local axes: X = right/left (wingspan), Y = fwd/back, Z = up
+-- B-52 has 8 engines in 4 paired pods:
+--   inner pods ~±120 HU from centerline
+--   outer pods ~±230 HU from centerline
+-- Plus one center-fuselage trail.
+-- ============================================================
+
 local TRAIL_MATERIAL = Material( "trails/smoke" )
 local SAMPLE_RATE    = 0.025
 
+-- X = wingspan offset, Y = rear of engine pod (negative = aft), Z = slight up
 local TRAIL_OFFSETS = {
-    Vector( 0, -180,  12 ),   -- inner-left engine pair
-    Vector( 0, -220,  12 ),   -- outer-left engine pair
-    Vector( 0,  180,  12 ),   -- inner-right engine pair
-    Vector( 0,  220,  12 ),   -- outer-right engine pair
-    Vector( 0, -110,   0 ),   -- fuselage center
+    Vector(  230, -60,  0 ),   -- outer-right engine pod pair
+    Vector(  120, -60,  0 ),   -- inner-right engine pod pair
+    Vector( -120, -60,  0 ),   -- inner-left  engine pod pair
+    Vector( -230, -60,  0 ),   -- outer-left  engine pod pair
+    Vector(    0, -80,  0 ),   -- fuselage center (faint)
 }
 
 local CONTRAIL_CFG = {
-    r = 255, g = 255, b = 255, a = 130,
-    startSize = 6, endSize = 32, lifetime = 8,
+    r = 255, g = 255, b = 255, a = 120,
+    startSize = 28, endSize = 8, lifetime = 8,
 }
 
 local B52Trails = {}

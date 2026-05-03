@@ -3,7 +3,14 @@ AddCSLuaFile("cl_trailsystem.lua")
 AddCSLuaFile("shared.lua")
 include("shared.lua")
 
-local MODEL_YAW_OFFSET    = -90   -- B-52 model nose points +X, GMod forward is +Y
+-- The B-52 model's nose points along its LOCAL +X axis.
+-- GMod's Angle(p,y,r):Forward() is the LOCAL +X direction when r=0,p=0.
+-- With MODEL_YAW_OFFSET = -90, the visual nose aligns with flightYaw.
+-- Because the model is rotated 90° relative to GMod's angle convention:
+--   - "pitch" (nose up/down) maps to GMod Angle.r  (roll channel)
+--   - "bank"  (wing tilt)    maps to GMod Angle.p  (pitch channel)
+-- So we build the final angle as: Angle( SmoothedRoll, flightYaw+OFFSET, -SmoothedPitch )
+local MODEL_YAW_OFFSET = -90
 
 local ROLL_SUSTAINED_GAIN = 2.2
 local ROLL_TRANSIENT_GAIN = 55.0
@@ -46,24 +53,20 @@ function ENT:Initialize()
     self.OrbitRadius  = self:GetVar("OrbitRadius",  4200)
     self.SkyHeightAdd = self:GetVar("SkyHeightAdd", 7000)
 
-    self.MaxHP           = CFG_MaxHP
-    self.FadeDuration    = CFG_FadeDuration
-    self.WeaponWindow    = CFG_WeaponWindow
-    self.S8_Delay        = CFG_S8_Delay
-    self.S8_Count        = CFG_S8_Count
-    self.S8_Scatter      = CFG_S8_Scatter
-    self.S8_MuzzlePoints    = CFG_S8_MuzzlePoints
-    self.VIKHR_Delay        = CFG_VIKHR_Delay
-    self.VIKHR_Count        = CFG_VIKHR_Count
-    self.VIKHR_Scatter      = CFG_VIKHR_Scatter
-    self.VIKHR_MuzzlePoints = CFG_VIKHR_MuzzlePoints
+    self.MaxHP        = CFG_MaxHP
+    self.FadeDuration = CFG_FadeDuration
+    self.WeaponWindow = CFG_WeaponWindow
+    self.S8_Delay     = CFG_S8_Delay     self.S8_Count     = CFG_S8_Count
+    self.S8_Scatter   = CFG_S8_Scatter   self.S8_MuzzlePoints    = CFG_S8_MuzzlePoints
+    self.VIKHR_Delay  = CFG_VIKHR_Delay  self.VIKHR_Count  = CFG_VIKHR_Count
+    self.VIKHR_Scatter= CFG_VIKHR_Scatter self.VIKHR_MuzzlePoints = CFG_VIKHR_MuzzlePoints
 
     if self.CallDir:LengthSqr() <= 1 then self.CallDir = Vector(1,0,0) end
     self.CallDir.z = 0
     self.CallDir:Normalize()
 
     local ground = self:FindGround(self.CenterPos)
-    if ground == -1 then ground = self.CenterPos.z end  -- B-52 high-alt fallback
+    if ground == -1 then ground = self.CenterPos.z end
 
     self.sky       = ground + self.SkyHeightAdd
     self.DieTime   = CurTime() + self.Lifetime
@@ -71,7 +74,6 @@ function ENT:Initialize()
 
     self.OrbitDirection = (math.random(2) == 1) and 1 or -1
 
-    -- Compute tangent and spawn offset exactly as AN-71
     local right   = Vector(-self.CallDir.y, self.CallDir.x, 0)
     local tangent = Vector(right.x * self.OrbitDirection, right.y * self.OrbitDirection, 0)
     tangent:Normalize()
@@ -106,6 +108,7 @@ function ENT:Initialize()
     self.PrevTurnRate = 0
     self.SmoothedRoll  = 0
     self.SmoothedPitch = 0
+    -- With -90 offset: Angle(SmoothedRoll, yaw+offset, -SmoothedPitch)
     self.ang = Angle(0, self.flightYaw + MODEL_YAW_OFFSET, 0)
 
     self.AltDriftCurrent  = self.sky
@@ -116,8 +119,8 @@ function ENT:Initialize()
     self.JitterPhase      = math.Rand(0, math.pi * 2)
     self.JitterAmplitude  = 8
 
-    self.RadialGain   = 0.5
-    self.MaxTurnRate  = 28
+    self.RadialGain  = 0.5
+    self.MaxTurnRate = 28
 
     self.IsTumbling        = false
     self.TumbleStartTime   = 0
@@ -144,9 +147,9 @@ function ENT:Initialize()
         self.EngineLoop:Play()
     end
 
-    self.CurrentWeapon   = nil
-    self.WeaponWindowEnd = 0
-    self.S8_ShotsFired   = 0   self.S8_NextShot   = 0   self.S8_MuzzleIndex   = 1
+    self.CurrentWeapon    = nil
+    self.WeaponWindowEnd  = 0
+    self.S8_ShotsFired    = 0  self.S8_NextShot    = 0  self.S8_MuzzleIndex    = 1
     self.VIKHR_ShotsFired = 0  self.VIKHR_NextShot = 0  self.VIKHR_MuzzleIndex = 1
 
     self:Debug("B-52 spawned at "..tostring(spawnPos).." sky="..self.sky.." OrbitDir="..self.OrbitDirection)
@@ -163,7 +166,7 @@ function ENT:OnTakeDamage(dmginfo)
 end
 
 function ENT:StartTumble()
-    self.IsTumbling = true self.TumbleStartTime = CurTime() self.TumbleCrashed = false
+    self.IsTumbling = true  self.TumbleStartTime = CurTime()  self.TumbleCrashed = false
     local gnd = self:FindGround(self:GetPos())
     if gnd ~= -1 then self.TumbleGroundZ = gnd end
     local fwd = Angle(0, self.flightYaw, 0):Forward()
@@ -297,10 +300,9 @@ function ENT:PhysicsUpdate(phys)
     local fwd2     = Vector(fwd3.x, fwd3.y, 0)
     fwd2:Normalize()
 
-    -- AN-71 cross-product turn rate
-    local cross   = fwd2.x * desired2.y - fwd2.y * desired2.x
-    local dot     = fwd2.x * desired2.x + fwd2.y * desired2.y
-    local urgency = (1 - dot) * 0.5
+    local cross    = fwd2.x * desired2.y - fwd2.y * desired2.x
+    local dot      = fwd2.x * desired2.x + fwd2.y * desired2.y
+    local urgency  = (1 - dot) * 0.5
     local turnRate = math.Clamp(cross * urgency * self.MaxTurnRate * 2,
                                 -self.MaxTurnRate, self.MaxTurnRate)
 
@@ -309,8 +311,6 @@ function ENT:PhysicsUpdate(phys)
     local turnRateDelta = turnRate - self.PrevTurnRate
     self.PrevTurnRate   = turnRate
 
-    -- Roll: positive turnRate = turning right = bank right (positive roll in GMod)
-    -- AN-71 uses +turnRate * gain (no sign flip)
     local sustained  = math.Clamp(turnRate      * ROLL_SUSTAINED_GAIN, -20, 20)
     local transient  = math.Clamp(turnRateDelta * ROLL_TRANSIENT_GAIN, -12, 12)
     local rollTarget = math.Clamp(sustained + transient, -ROLL_MAX, ROLL_MAX)
@@ -323,10 +323,14 @@ function ENT:PhysicsUpdate(phys)
     local targetPitch  = math.Clamp(climbDelta * 6, -8, 8)
     self.SmoothedPitch = Lerp(0.03, self.SmoothedPitch, targetPitch)
 
+    -- KEY FIX: model is rotated -90° around Z relative to GMod angle convention.
+    -- Angle(p, y, r) with the model rotated -90° means:
+    --   p channel controls LEFT/RIGHT tilt  -> put SmoothedRoll here
+    --   r channel controls UP/DOWN nose     -> put -SmoothedPitch here (negated for correct direction)
     self.ang = Angle(
-        self.SmoothedPitch,
+        self.SmoothedRoll,
         self.flightYaw + MODEL_YAW_OFFSET,
-        self.SmoothedRoll
+        -self.SmoothedPitch
     )
 
     local newPos = pos + fwdAngle:Forward() * self.Speed * dt
@@ -334,14 +338,14 @@ function ENT:PhysicsUpdate(phys)
 
     if not util.IsInWorld(newPos) then
         self:Debug("OOB guard - steering to center")
-        local toC = flatCenter - Vector(pos.x, pos.y, 0) toC.z = 0
+        local toC = flatCenter - Vector(pos.x, pos.y, 0)  toC.z = 0
         if toC:LengthSqr() < 0.001 then toC = Vector(-fwd2.x, -fwd2.y, 0) end
         toC:Normalize()
         local sCross = fwd2.x*toC.y - fwd2.y*toC.x
         self.flightYaw = self.flightYaw
             + math.Clamp(sCross * self.MaxTurnRate, -self.MaxTurnRate, self.MaxTurnRate) * dt
         self:SetPos(pos)
-        self:SetAngles(Angle(self.SmoothedPitch, self.flightYaw+MODEL_YAW_OFFSET, self.SmoothedRoll))
+        self:SetAngles(Angle(self.SmoothedRoll, self.flightYaw+MODEL_YAW_OFFSET, -self.SmoothedPitch))
         return
     end
 
@@ -354,7 +358,7 @@ function ENT:GetPrimaryTarget()
     for _, ply in ipairs(player.GetAll()) do
         if not IsValid(ply) or not ply:Alive() then continue end
         local d = ply:GetPos():DistToSqr(self.CenterPos)
-        if d < closestDist then closestDist = d closest = ply end
+        if d < closestDist then closestDist = d  closest = ply end
     end
     return closest
 end
@@ -362,7 +366,7 @@ end
 function ENT:GetTargetGroundPos()
     local target = self:GetPrimaryTarget()
     if IsValid(target) then return target:GetPos() end
-    local tr = util.QuickTrace(Vector(self.CenterPos.x, self.CenterPos.y, self.sky), Vector(0,0,-30000), self)
+    local tr = util.QuickTrace(Vector(self.CenterPos.x,self.CenterPos.y,self.sky), Vector(0,0,-30000), self)
     return tr.HitPos
 end
 
@@ -384,9 +388,9 @@ function ENT:PickNewWeapon(ct)
     self.WeaponWindowEnd = ct + self.WeaponWindow
     self:Debug("Weapon: "..self.CurrentWeapon)
     if self.CurrentWeapon == "s8_salvo" then
-        self.S8_ShotsFired=0 self.S8_NextShot=ct+0.5 self.S8_MuzzleIndex=1
+        self.S8_ShotsFired=0  self.S8_NextShot=ct+0.5  self.S8_MuzzleIndex=1
     else
-        self.VIKHR_ShotsFired=0 self.VIKHR_NextShot=ct+1.0 self.VIKHR_MuzzleIndex=1
+        self.VIKHR_ShotsFired=0  self.VIKHR_NextShot=ct+1.0  self.VIKHR_MuzzleIndex=1
     end
 end
 
@@ -399,26 +403,24 @@ function ENT:UpdateS8Salvo(ct)
     local muzzlePos = self:GetMuzzleWorldPos(muzzleLocal)
     local targetPos = self:GetTargetGroundPos()+Vector(math.Rand(-self.S8_Scatter,self.S8_Scatter),math.Rand(-self.S8_Scatter,self.S8_Scatter),0)
     local dir = targetPos - muzzlePos
-    if dir:LengthSqr() < 1 then return end dir:Normalize()
+    if dir:LengthSqr() < 1 then return end  dir:Normalize()
     local rocket = ents.Create("gb_s8kom_rocket")
     if not IsValid(rocket) then self:Debug("gb_s8kom_rocket failed") return end
-    rocket:SetPos(muzzlePos) rocket:SetAngles(dir:Angle()) rocket:SetOwner(self) rocket.IsOnPlane=true
-    rocket:Spawn() rocket:Activate()
-    rocket.Armed=true rocket.ShouldExplode=true
-    rocket:Launch() rocket:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
+    rocket:SetPos(muzzlePos)  rocket:SetAngles(dir:Angle())  rocket:SetOwner(self)  rocket.IsOnPlane=true
+    rocket:Spawn()  rocket:Activate()
+    rocket.Armed=true  rocket.ShouldExplode=true
+    rocket:Launch()  rocket:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
     local rPhys = rocket:GetPhysicsObject()
-    if IsValid(rPhys) then
-        rPhys:SetVelocity(Angle(0,self.flightYaw,0):Forward() * self.Speed)
-    end
+    if IsValid(rPhys) then rPhys:SetVelocity(Angle(0,self.flightYaw,0):Forward() * self.Speed) end
     self:SpawnMuzzleFX(muzzlePos)
     sound.Play(table.Random(SOUNDS_ATGM_IGNITE), muzzlePos, 110, math.random(95,105), 1.0)
     timer.Simple(0.1, function() if IsValid(rocket) then sound.Play(table.Random(SOUNDS_LAUNCH), rocket:GetPos(), 105, math.random(95,105), 1.0) end end)
     rocket.IdleSound = CreateSound(rocket, SOUND_ROCKET_IDLE)
-    if rocket.IdleSound then rocket.IdleSound:Play() rocket.IdleSound:ChangePitch(math.random(90,115),0) rocket.IdleSound:ChangeVolume(0.8,0) end
-    local oldR=rocket.OnRemove rocket.OnRemove=function(s) if oldR then oldR(s) end if s.IdleSound then s.IdleSound:Stop() end end
-    local oldE=rocket.OnExplode rocket.OnExplode=function(s,p,n) if oldE then oldE(s,p,n) end if s.IdleSound then s.IdleSound:Stop() end end
+    if rocket.IdleSound then rocket.IdleSound:Play()  rocket.IdleSound:ChangePitch(math.random(90,115),0)  rocket.IdleSound:ChangeVolume(0.8,0) end
+    local oldR=rocket.OnRemove  rocket.OnRemove=function(s) if oldR then oldR(s) end  if s.IdleSound then s.IdleSound:Stop() end end
+    local oldE=rocket.OnExplode  rocket.OnExplode=function(s,p,n) if oldE then oldE(s,p,n) end  if s.IdleSound then s.IdleSound:Stop() end end
     constraint.NoCollide(rocket, self, 0, 0)
-    local ref=rocket timer.Simple(0.5, function() if IsValid(ref) and IsValid(self) then constraint.RemoveConstraints(ref,"NoCollide") end end)
+    local ref=rocket  timer.Simple(0.5, function() if IsValid(ref) and IsValid(self) then constraint.RemoveConstraints(ref,"NoCollide") end end)
 end
 
 function ENT:UpdateVikhr(ct)
@@ -430,35 +432,33 @@ function ENT:UpdateVikhr(ct)
     local muzzlePos = self:GetMuzzleWorldPos(muzzleLocal)
     local targetPos = self:GetTargetGroundPos()+Vector(math.Rand(-self.VIKHR_Scatter,self.VIKHR_Scatter),math.Rand(-self.VIKHR_Scatter,self.VIKHR_Scatter),0)
     local dir = targetPos - muzzlePos
-    if dir:LengthSqr() < 1 then return end dir:Normalize()
+    if dir:LengthSqr() < 1 then return end  dir:Normalize()
     local rocket = ents.Create("gb_9k121_rocket")
     if not IsValid(rocket) then self:Debug("gb_9k121_rocket failed") return end
-    rocket:SetPos(muzzlePos) rocket:SetAngles(dir:Angle()) rocket:SetOwner(self) rocket.IsOnPlane=true
-    rocket:Spawn() rocket:Activate()
-    rocket.Armed=true rocket.ShouldExplode=true rocket.ShouldExplodeOnImpact=true
+    rocket:SetPos(muzzlePos)  rocket:SetAngles(dir:Angle())  rocket:SetOwner(self)  rocket.IsOnPlane=true
+    rocket:Spawn()  rocket:Activate()
+    rocket.Armed=true  rocket.ShouldExplode=true  rocket.ShouldExplodeOnImpact=true
     rocket:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
     local startpos = self:LocalToWorld(self:OBBCenter())
     local tr = util.TraceHull({start=startpos,endpos=startpos+dir*500000,mins=Vector(-25,-25,-25),maxs=Vector(25,25,25),filter=self})
     local rPhys = rocket:GetPhysicsObject()
-    if IsValid(rPhys) then
-        rPhys:SetVelocity(Angle(0,self.flightYaw,0):Forward() * self.Speed)
-    end
+    if IsValid(rPhys) then rPhys:SetVelocity(Angle(0,self.flightYaw,0):Forward() * self.Speed) end
     constraint.NoCollide(rocket, self, 0, 0)
     local ref = rocket
     timer.Simple(0.25, function()
         if not IsValid(ref) then return end
-        if tr.Hit then ref.JDAM=true ref.target=tr.Entity ref.targetOffset=IsValid(tr.Entity) and tr.Entity:WorldToLocal(tr.HitPos) or tr.HitPos ref.dropping=true end
-        ref.Armed=true ref:Launch() ref:SetCollisionGroup(0)
+        if tr.Hit then ref.JDAM=true  ref.target=tr.Entity  ref.targetOffset=IsValid(tr.Entity) and tr.Entity:WorldToLocal(tr.HitPos) or tr.HitPos  ref.dropping=true end
+        ref.Armed=true  ref:Launch()  ref:SetCollisionGroup(0)
     end)
     self:SpawnMuzzleFX(muzzlePos)
     sound.Play(table.Random(SOUNDS_ATGM_IGNITE), muzzlePos, 0, 100, 1.0)
     timer.Simple(0.1, function() if IsValid(rocket) then sound.Play(table.Random(SOUNDS_LAUNCH), rocket:GetPos(), 105, math.random(95,105), 1.0) end end)
     rocket.IdleSound = CreateSound(rocket, SOUND_ROCKET_IDLE)
-    if rocket.IdleSound then rocket.IdleSound:Play() rocket.IdleSound:ChangePitch(math.random(85,110),0) rocket.IdleSound:ChangeVolume(0.9,0) end
-    local oldR=rocket.OnRemove rocket.OnRemove=function(s) if oldR then oldR(s) end if s.IdleSound then s.IdleSound:Stop() end end
+    if rocket.IdleSound then rocket.IdleSound:Play()  rocket.IdleSound:ChangePitch(math.random(85,110),0)  rocket.IdleSound:ChangeVolume(0.9,0) end
+    local oldR=rocket.OnRemove  rocket.OnRemove=function(s) if oldR then oldR(s) end  if s.IdleSound then s.IdleSound:Stop() end end
     local oldE=rocket.OnExplode
     rocket.OnExplode=function(s,p,n)
-        if oldE then oldE(s,p,n) end if s.IdleSound then s.IdleSound:Stop() end
+        if oldE then oldE(s,p,n) end  if s.IdleSound then s.IdleSound:Stop() end
         local hp=p or s:GetPos()
         local e1=EffectData() e1:SetOrigin(hp) e1:SetScale(4) e1:SetMagnitude(4) e1:SetRadius(400) util.Effect("500lb_air",e1,true,true)
         local e2=EffectData() e2:SetOrigin(hp+Vector(0,0,60)) e2:SetScale(3) e2:SetMagnitude(3) e2:SetRadius(300) util.Effect("500lb_air",e2,true,true)
