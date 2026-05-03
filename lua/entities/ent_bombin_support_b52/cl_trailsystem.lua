@@ -1,19 +1,22 @@
 -- ============================================================
--- CONTRAIL SYSTEM  --  ent_bombin_support_b52
--- 5 persistent beam trails: 4 engine pods (2 per wing) + 1 tail.
+-- CONTRAIL SYSTEM  --  ent_bombin_support_b52 (B-52)
+-- Five persistent beam trails: left outer pod, left inner pod,
+-- right inner pod, right outer pod, and tail center.
+-- Hook names are unique -- no collision with TB2 or AC-130.
 -- ============================================================
 
 local TRAIL_MATERIAL = Material( "trails/smoke" )
-local SAMPLE_RATE    = 0.025
+local SAMPLE_RATE    = 0.025  -- 40 fps
 
--- B-52G has 8 engines in 4 underwing pods.
--- Offsets are in local space (X = forward, Y = right, Z = up).
+-- B-52G has 8 engines in 4 underwing pods (2 engines per pod).
+-- We emit one contrail per pod (4) plus one from the tail (1) = 5 total.
+-- Tune X/Y/Z offsets to match the model's actual pod positions.
 local TRAIL_OFFSETS = {
-    Vector( -30, -220, -15 ),  -- left outer pod
-    Vector( -30, -110, -15 ),  -- left inner pod
-    Vector( -30,  110, -15 ),  -- right inner pod
-    Vector( -30,  220, -15 ),  -- right outer pod
-    Vector( -130,   0, -10 ),  -- tail / rear fuselage
+    Vector( -30, -200, -15 ),  -- left outer engine pod
+    Vector( -30, -100, -15 ),  -- left inner engine pod
+    Vector( -30,  100, -15 ),  -- right inner engine pod
+    Vector( -30,  200, -15 ),  -- right outer engine pod
+    Vector( -120,   0, -10 ),  -- tail / fuselage center
 }
 
 local CONTRAIL_CFG = {
@@ -22,8 +25,8 @@ local CONTRAIL_CFG = {
     b         = 255,
     a         = 140,
     startSize = 6,
-    endSize   = 45,
-    lifetime  = 9,
+    endSize   = 40,
+    lifetime  = 8,
 }
 
 local B52Trails = {}
@@ -81,7 +84,10 @@ hook.Add( "Think", "bombin_b52_contrail_update", function()
             if Time < state.nextSample then continue end
             state.nextSample = Time + SAMPLE_RATE
 
-            local wpos = LocalToWorld( TRAIL_OFFSETS[i], Angle(0,0,0), ent:GetPos(), ent:GetAngles() )
+            local wpos = LocalToWorld(
+                TRAIL_OFFSETS[i], Angle( 0, 0, 0 ),
+                ent:GetPos(), ent:GetAngles()
+            )
             table.insert( state.positions, { time = Time, pos = wpos } )
             table.sort( state.positions, function( a, b ) return a.time > b.time end )
         end
