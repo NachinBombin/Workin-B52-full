@@ -3,6 +3,10 @@ if SERVER then
 
     util.AddNetworkString("BombinSupportB52_FlareSpawned")
 
+    -- ============================================================
+    -- ConVars
+    -- ============================================================
+
     local SHARED_FLAGS = bit.bor(FCVAR_ARCHIVE, FCVAR_REPLICATED, FCVAR_NOTIFY)
 
     local cv_enabled  = CreateConVar("npc_bombinb52_enabled",   "1",    SHARED_FLAGS, "Enable/disable B-52 support calls")
@@ -18,11 +22,19 @@ if SERVER then
     local cv_height   = CreateConVar("npc_bombinb52_height",    "7500", SHARED_FLAGS, "Altitude above ground HU")
     local cv_announce = CreateConVar("npc_bombinb52_announce",  "0",    SHARED_FLAGS, "Debug prints")
 
+    -- ============================================================
+    -- NPC classes that can call the B-52
+    -- ============================================================
+
     local CALLERS = {
         ["npc_combine_s"]     = true,
         ["npc_metropolice"]   = true,
         ["npc_combine_elite"] = true,
     }
+
+    -- ============================================================
+    -- HELPERS
+    -- ============================================================
 
     local function BSP_Debug(msg)
         if not cv_announce:GetBool() then return end
@@ -88,10 +100,16 @@ if SERVER then
     end
 
     local function SpawnSupportB52AtPos(centerPos)
-        if not scripted_ents.GetStored("ent_bombin_support_b52") then return false end
+        if not scripted_ents.GetStored("ent_bombin_support_b52") then
+            BSP_Debug("Entity ent_bombin_support_b52 not registered!")
+            return false
+        end
 
         local b52 = ents.Create("ent_bombin_support_b52")
-        if not IsValid(b52) then return false end
+        if not IsValid(b52) then
+            BSP_Debug("B-52 ents.Create failed")
+            return false
+        end
 
         b52:SetPos(centerPos)
         b52:SetVar("CenterPos",    centerPos)
@@ -117,6 +135,7 @@ if SERVER then
         local npcPos   = npc:GetPos()
         local enemyPos = enemy:GetPos()
         local dist     = npcPos:Distance(enemyPos)
+
         if dist < cv_min_dist:GetFloat() or dist > cv_max_dist:GetFloat() then return end
         if not CheckSkyAbove(npcPos) then return end
         if math.random() > cv_chance:GetFloat() then return end
@@ -127,6 +146,7 @@ if SERVER then
 
         local centerPos = enemyPos
         ThrowSupportFlare(npc, enemyPos)
+
         timer.Simple(cv_delay:GetFloat(), function()
             SpawnSupportB52AtPos(centerPos)
         end)
