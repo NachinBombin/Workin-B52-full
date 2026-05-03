@@ -1,10 +1,6 @@
 include("shared.lua")
 include("cl_trailsystem.lua")
 
--- cl_init mirrors the TB-2 pattern exactly:
--- server drives SetColor alpha each Think tick; client just calls DrawModel().
--- SetBodygroup must be set on the client too so the mesh shows.
-
 function ENT:Initialize()
     self:SetBodygroup(1, 1)
 end
@@ -13,25 +9,21 @@ function ENT:Draw()
     self:DrawModel()
 end
 
--- ============================================================
--- PRECACHE
--- ============================================================
+-- Precache
 game.AddParticles("particles/fire_01.pcf")
 PrecacheParticleSystem("fire_medium_02")
 
--- ============================================================
--- DAMAGE TIERS
--- ============================================================
 local TIER_OFFSETS = {
     [1] = { Vector(-80,-90,-8), Vector(-80,90,-8) },
     [2] = { Vector(0,0,0), Vector(-80,-90,-8), Vector(-80,90,-8), Vector(-80,-180,-8), Vector(-80,180,-8) },
-    [3] = { Vector(0,0,5), Vector(-80,-90,-8), Vector(-80,90,-8), Vector(-80,-180,-8), Vector(-80,180,-8), Vector(0,230,-10), Vector(0,-230,-10), Vector(-160,0,-5) },
+    [3] = { Vector(0,0,5), Vector(-80,-90,-8), Vector(-80,90,-8), Vector(-80,-180,-8), Vector(-80,180,-8),
+            Vector(0,230,-10), Vector(0,-230,-10), Vector(-160,0,-5) },
 }
 local TIER_BURST_DELAY = { [1]=5.0, [2]=2.5, [3]=0.9 }
 local TIER_BURST_COUNT = { [1]=2,   [2]=3,   [3]=5   }
 local PlaneStates = {}
 
-local function BurstAt(wPos, tier)
+local function BurstAt(wPos,tier)
     local ed=EffectData() ed:SetOrigin(wPos) ed:SetScale(tier==3 and math.Rand(0.8,1.4) or math.Rand(0.4,0.9)) ed:SetMagnitude(1) ed:SetRadius(tier*25) util.Effect("Explosion",ed)
     local ed2=EffectData() ed2:SetOrigin(wPos) ed2:SetNormal(Vector(0,0,1)) ed2:SetScale(tier*0.35) ed2:SetMagnitude(tier*0.4) ed2:SetRadius(20) util.Effect("ManhackSparks",ed2)
     if tier>=2 then local ed3=EffectData() ed3:SetOrigin(wPos) ed3:SetNormal(VectorRand()) ed3:SetScale(0.7) util.Effect("ElectricSpark",ed3) end
@@ -65,7 +57,7 @@ local function ApplyFlameParticles(ent,state,tier)
     state.nextBurst=CurTime()+(TIER_BURST_DELAY[tier] or 4)
 end
 
-net.Receive("bombin_b52_damage_tier", function()
+net.Receive("bombin_b52_damage_tier",function()
     local entIndex=net.ReadUInt(16) local tier=net.ReadUInt(2) local ent=Entity(entIndex)
     local state=PlaneStates[entIndex]
     if not state then state={tier=0,particles={},nextBurst=0} PlaneStates[entIndex]=state end
