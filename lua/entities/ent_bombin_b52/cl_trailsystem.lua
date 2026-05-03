@@ -1,102 +1,160 @@
 -- ============================================================
--- CONTRAIL SYSTEM  --  ent_bombin_b52
--- 5 persistent beam trails simulating the B-52's 8-engine exhausts.
--- 4 engine positions (left outer, left inner, right inner, right outer)
--- + 1 central belly trail.
+--  B-52 Stratofortress – 5-engine contrail system
+--  lua/entities/ent_bombin_b52/cl_trailsystem.lua
+--
+--  The B-52G has 8 turbojet engines mounted in 4 double-pods
+--  under the swept wing.  We represent them with 5 contrail
+--  emitters:
+--    Left outer pod,  Left inner pod
+--    Right inner pod, Right outer pod
+--    + one central / fuselage-wash trail
+--
+--  Offsets are in the entity's local space (forward = +X).
 -- ============================================================
 
-local TRAIL_MATERIAL = Material( "trails/smoke" )
-local SAMPLE_RATE    = 0.025   -- 40 fps sampling
-
--- 5 emission points: outboard left, inboard left, inboard right, outboard right, + belly center.
--- X = forward/back, Y = left/right (positive = right), Z = up/down.
+-- Local offsets for each contrail emitter
 local TRAIL_OFFSETS = {
-    Vector( -130,  -180, -8  ),   -- Left outer engines pod
-    Vector( -130,   -80, -8  ),   -- Left inner engines pod
-    Vector( -130,    80, -8  ),   -- Right inner engines pod
-    Vector( -130,   180, -8  ),   -- Right outer engines pod
-    Vector( -130,     0, -14 ),   -- Belly / center
+    Vector( -220,  -210, -12 ),   -- left  outer engine pod
+    Vector( -180,  -110, -12 ),   -- left  inner engine pod
+    Vector(  0,       0,  -6 ),   -- fuselage center wash
+    Vector( -180,   110, -12 ),   -- right inner engine pod
+    Vector( -220,   210, -12 ),   -- right outer engine pod
 }
 
--- Contrail config: thinner near B-52, widens behind it.
-local CONTRAIL_CFG = {
-    r         = 255,
-    g         = 255,
-    b         = 255,
-    a         = 120,
-    startSize = 5,
-    endSize   = 28,
-    lifetime  = 8,
-}
+-- Per-trail visual variation
+local TRAIL_WIDTHS = { 14, 12, 10, 12, 14 }
+local TRAIL_LIFE   = { 4.0, 3.6, 3.2, 3.6, 4.0 }
 
-local B52Trails = {}   -- [entIndex] = { trails = { [1..5] = { nextSample, positions } } }
+local TRAIL_MAT    = Material( "trails/smoke" )
+local TRAIL_COLOR  = Color( 255, 255, 255, 220 )
 
-local function EnsureRegistered( entIndex )
-    if B52Trails[entIndex] then return end
-    local trails = {}
-    for i = 1, 5 do
-        trails[i] = { nextSample = 0, positions = {} }
+local activeTrails = {}
+
+-- ============================================================
+-- START TRAILS
+-- ============================================================
+local function StartTrails( ent )
+    local entIdx = ent:EntIndex()
+    if activeTrails[entIdx] then return end  -- already running
+
+    activeTrails[entIdx] = {}
+
+    for i, localOff in ipairs( TRAIL_OFFSETS ) do
+        -- We parent each trail to a tiny invisible helper entity
+        -- so the trail follows the exact engine-pod position.
+        -- Using util.SpriteTrail on the plane itself with a fixed
+        -- attachment would apply only one offset, so we drive the
+        -- trail start-pos manually each tick instead.
+        activeTrails[entIdx][i] = {
+            startPos = ent:LocalToWorld( localOff ),
+            width    = TRAIL_WIDTHS[i] or 12,
+            life     = TRAIL_LIFE[i]   or 3.5,
+            segments = {}, -- { pos, time }
+        }
     end
-    B52Trails[entIndex] = { trails = trails }
 end
 
-local function DrawBeam( positions, cfg )
-    local n = #positions
-    if n < 2 then return end
-
-    local Time = CurTime()
-    local lt   = cfg.lifetime
-
-    for i = n, 1, -1 do
-        if Time - positions[i].time > lt then
-            table.remove( positions, i )
-        end
-    end
-
-    n = #positions
-    if n < 2 then return end
-
-    render.SetMaterial( TRAIL_MATERIAL )
-    render.StartBeam( n )
-    for _, pd in ipairs( positions ) do
-        local Scale = math.Clamp( (pd.time + lt - Time) / lt, 0, 1 )
-        local size  = cfg.startSize * Scale + cfg.endSize * (1 - Scale)
-        render.AddBeam( pd.pos, size, pd.time * 50,
-            Color( cfg.r, cfg.g, cfg.b, cfg.a * Scale * Scale ) )
-    end
-    render.EndBeam()
+-- ============================================================
+-- STOP TRAILS
+-- ============================================================
+local function StopTrails( entIdx )
+    activeTrails[entIdx] = nil
 end
 
-hook.Add( "Think", "bombin_b52_contrail_update", function()
-    local Time = CurTime()
+-- ============================================================
+-- HOOK: Think – update segment positions
+-- ============================================================
+hook.Add( "Think", "BombinB52_TrailThink", function()
+    local ct = CurTime()
 
-    for _, ent in ipairs( ents.FindByClass( "ent_bombin_b52" ) ) do
-        EnsureRegistered( ent:EntIndex() )
-    end
-
-    for entIndex, data in pairs( B52Trails ) do
-        local ent = Entity( entIndex )
+    for entIdx, trails in pairs( activeTrails ) do
+        local ent = Entity( entIdx )
         if not IsValid( ent ) then
-            B52Trails[entIndex] = nil
+            StopTrails( entIdx )
             continue
         end
 
-        for i, trail in ipairs( data.trails ) do
-            if Time < trail.nextSample then continue end
-            trail.nextSample = Time + SAMPLE_RATE
+        for i, trail in ipairs( trails ) do
+            local worldPos = ent:LocalToWorld( TRAIL_OFFSETS[i] )
 
-            local wpos = LocalToWorld( TRAIL_OFFSETS[i], Angle(0,0,0), ent:GetPos(), ent:GetAngles() )
-            table.insert( trail.positions, { time = Time, pos = wpos } )
-            table.sort( trail.positions, function( a, b ) return a.time > b.time end )
+            -- Push new segment
+            table.insert( trail.segments, 1, { pos = worldPos, t = ct } )
+
+            -- Prune old segments
+            local lifeLimit = trail.life
+            while #trail.segments > 0 and ( ct - trail.segments[#trail.segments].t ) > lifeLimit do
+                table.remove( trail.segments )
+            end
         end
     end
 end )
 
-hook.Add( "PostDrawTranslucentRenderables", "bombin_b52_contrail_draw", function( bDepth, bSkybox )
-    if bSkybox then return end
-    for _, data in pairs( B52Trails ) do
-        for _, trail in ipairs( data.trails ) do
-            DrawBeam( trail.positions, CONTRAIL_CFG )
+-- ============================================================
+-- HOOK: DrawTranslucentRenderables – render each trail
+-- ============================================================
+hook.Add( "DrawTranslucentRenderables", "BombinB52_TrailDraw", function()
+    local ct = CurTime()
+
+    for entIdx, trails in pairs( activeTrails ) do
+        local ent = Entity( entIdx )
+        if not IsValid( ent ) then continue end
+
+        local entAlpha = ent:GetColor().a / 255  -- respect fade-in / fade-out
+
+        for _, trail in ipairs( trails ) do
+            local segs = trail.segments
+            if #segs < 2 then continue end
+
+            render.SetMaterial( TRAIL_MAT )
+            render.StartBeam( #segs )
+
+            for j, seg in ipairs( segs ) do
+                -- Age fraction: 0 = newest, 1 = oldest
+                local age      = ct - seg.t
+                local ageFrac  = math.Clamp( age / trail.life, 0, 1 )
+
+                -- Width tapers from full at head to 0 at tail
+                local w        = trail.width * ( 1 - ageFrac )
+
+                -- Alpha tapers from opaque at head to transparent at tail
+                local a        = TRAIL_COLOR.a * ( 1 - ageFrac ) * entAlpha
+
+                render.AddBeam(
+                    seg.pos,
+                    w,
+                    j / #segs,
+                    Color( TRAIL_COLOR.r, TRAIL_COLOR.g, TRAIL_COLOR.b, a )
+                )
+            end
+
+            render.EndBeam()
         end
     end
 end )
+
+-- ============================================================
+-- ENT hooks – call these from cl_init.lua via ENT:Initialize
+-- and ENT:OnRemove
+-- ============================================================
+
+function ENT:InitTrails()
+    StartTrails( self )
+end
+
+function ENT:RemoveTrails()
+    StopTrails( self:EntIndex() )
+end
+
+-- Auto-hook into entity lifecycle
+local _origInit   = ENT.Initialize
+local _origRemove = ENT.OnRemove
+
+function ENT:Initialize()
+    if _origInit then _origInit( self ) end
+    self:InitTrails()
+end
+
+function ENT:OnRemove()
+    self:RemoveTrails()
+    if _origRemove then _origRemove( self ) end
+end
