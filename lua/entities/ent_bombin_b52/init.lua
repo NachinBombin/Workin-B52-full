@@ -7,9 +7,10 @@ include("shared.lua")
 -- GMod's Angle(p,y,r):Forward() is the LOCAL +X direction when r=0,p=0.
 -- With MODEL_YAW_OFFSET = -90, the visual nose aligns with flightYaw.
 -- Because the model is rotated 90° relative to GMod's angle convention:
---   - "pitch" (nose up/down) maps to GMod Angle.r  (roll channel)
 --   - "bank"  (wing tilt)    maps to GMod Angle.p  (pitch channel)
--- So we build the final angle as: Angle( SmoothedRoll, flightYaw+OFFSET, -SmoothedPitch )
+--   - "pitch" (nose up/down) maps to GMod Angle.r  (roll channel)
+-- Roll sign is NEGATIVE: turning right -> positive turnRate -> negative SmoothedRoll -> right wing down (correct).
+-- So final angle: Angle( -SmoothedRoll, flightYaw+OFFSET, -SmoothedPitch )
 local MODEL_YAW_OFFSET = -90
 
 local ROLL_SUSTAINED_GAIN = 2.2
@@ -108,7 +109,6 @@ function ENT:Initialize()
     self.PrevTurnRate = 0
     self.SmoothedRoll  = 0
     self.SmoothedPitch = 0
-    -- With -90 offset: Angle(SmoothedRoll, yaw+offset, -SmoothedPitch)
     self.ang = Angle(0, self.flightYaw + MODEL_YAW_OFFSET, 0)
 
     self.AltDriftCurrent  = self.sky
@@ -323,12 +323,9 @@ function ENT:PhysicsUpdate(phys)
     local targetPitch  = math.Clamp(climbDelta * 6, -8, 8)
     self.SmoothedPitch = Lerp(0.03, self.SmoothedPitch, targetPitch)
 
-    -- KEY FIX: model is rotated -90° around Z relative to GMod angle convention.
-    -- Angle(p, y, r) with the model rotated -90° means:
-    --   p channel controls LEFT/RIGHT tilt  -> put SmoothedRoll here
-    --   r channel controls UP/DOWN nose     -> put -SmoothedPitch here (negated for correct direction)
+    -- -SmoothedRoll: turning right -> positive turnRate -> positive SmoothedRoll -> negative p -> right wing banks down. Correct.
     self.ang = Angle(
-        self.SmoothedRoll,
+        -self.SmoothedRoll,
         self.flightYaw + MODEL_YAW_OFFSET,
         -self.SmoothedPitch
     )
@@ -345,7 +342,7 @@ function ENT:PhysicsUpdate(phys)
         self.flightYaw = self.flightYaw
             + math.Clamp(sCross * self.MaxTurnRate, -self.MaxTurnRate, self.MaxTurnRate) * dt
         self:SetPos(pos)
-        self:SetAngles(Angle(self.SmoothedRoll, self.flightYaw+MODEL_YAW_OFFSET, -self.SmoothedPitch))
+        self:SetAngles(Angle(-self.SmoothedRoll, self.flightYaw+MODEL_YAW_OFFSET, -self.SmoothedPitch))
         return
     end
 
