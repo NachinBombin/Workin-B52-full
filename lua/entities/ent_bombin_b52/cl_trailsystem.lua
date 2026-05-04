@@ -1,28 +1,30 @@
 -- ============================================================
 -- CONTRAIL SYSTEM  --  ent_bombin_b52
--- 5 emission points spread across the wing span (X axis).
--- Model-local axes: X = right/left (wingspan), Y = fwd/back, Z = up
--- B-52 has 8 engines in 4 paired pods:
---   inner pods ~±120 HU from centerline
---   outer pods ~±230 HU from centerline
--- Plus one center-fuselage trail.
+-- Trail offsets are scaled to match MODEL_SCALE = 1.8.
+-- Original unscaled offsets (1.0x):
+--   inner pods ~±120 HU, outer pods ~±230 HU
+-- Scaled 1.8x:
+--   inner pods ~±216 HU, outer pods ~±414 HU
+-- Trail ribbon sizes also scaled: startSize 28→50, endSize 8→14.
 -- ============================================================
 
 local TRAIL_MATERIAL = Material( "trails/smoke" )
 local SAMPLE_RATE    = 0.025
 
--- X = wingspan offset, Y = rear of engine pod (negative = aft), Z = slight up
+-- X = wingspan offset, Y = rear of engine pod, Z = slight up
+-- All values multiplied by 1.8 to match the scaled model.
 local TRAIL_OFFSETS = {
-    Vector(  230, -60,  0 ),   -- outer-right engine pod pair
-    Vector(  120, -60,  0 ),   -- inner-right engine pod pair
-    Vector( -120, -60,  0 ),   -- inner-left  engine pod pair
-    Vector( -230, -60,  0 ),   -- outer-left  engine pod pair
-    Vector(    0, -80,  0 ),   -- fuselage center (faint)
+    Vector(  414, -108,  0 ),   -- outer-right engine pod pair  (230 * 1.8)
+    Vector(  216, -108,  0 ),   -- inner-right engine pod pair  (120 * 1.8)
+    Vector( -216, -108,  0 ),   -- inner-left  engine pod pair
+    Vector( -414, -108,  0 ),   -- outer-left  engine pod pair
+    Vector(    0, -144,  0 ),   -- fuselage center              ( 80 * 1.8)
 }
 
 local CONTRAIL_CFG = {
     r = 255, g = 255, b = 255, a = 120,
-    startSize = 28, endSize = 8, lifetime = 8,
+    -- startSize / endSize scaled 1.8x for the larger model.
+    startSize = 50, endSize = 14, lifetime = 8,
 }
 
 local B52Trails = {}

@@ -21,6 +21,11 @@ local ROLL_LERP_OUT       = 0.012
 
 local ENGINE_LOOP_SOUND = "sound/b52/b52.wav"
 
+-- Model scale applied in Initialize.
+-- All collision / physics still use the base vphysics hull;
+-- SetModelScale is visual only but makes the aircraft feel massive.
+local MODEL_SCALE = 1.8
+
 -- ============================================================
 -- SW MUNITIONS CATALOGUE
 -- ============================================================
@@ -52,117 +57,108 @@ local CFG_PeacefulMax  = 14
 local CFG_BombBayLocal = Vector(0, 0, -35)
 
 -- Gravity estimate for ballistic lead calculation.
--- SW bombs will correct themselves with aerodynamics so this only needs
--- to put them roughly on track at release.
 local GRAVITY_EST = 580
 
 -- Min/max clamped horizontal release speed.
 local BALLISTIC_MIN_H = 150
 local BALLISTIC_MAX_H = 3200
 
+-- Retarded bombs: multiplier on the aircraft forward speed that is
+-- imparted at release BEFORE the chute opens.
+-- At 1.0 the bomb inherits cruise speed only (260 u/s).
+-- Raising this to 3.5 gives a strong forward throw so the bomb lands
+-- well ahead of the drop point — the chute then arrests vertical
+-- speed but the horizontal kick has already placed it on target.
+local CFG_W6_FwdMult = 3.5
+
 -- ---------- W1 — Precision guided ----------
--- GPS, laser, electro-optical and glide weapons.
--- Small scatter (their own guidance closes the gap).
 local CFG_W1_Count   = 4
-local CFG_W1_Delay   = 3.0     -- slow salvo — each needs time to guide
-local CFG_W1_Scatter = 300     -- guidance closes this easily
+local CFG_W1_Delay   = 3.0
+local CFG_W1_Scatter = 300
 local CFG_W1_Pool    = {
-    "sw_bomb_gbu31_v3",        -- GBU-31 JDAM  2000 lb GPS
-    "sw_bomb_gbu32_v3",        -- GBU-32 JDAM  1000 lb GPS
-    "sw_bomb_gbu38_v3",        -- GBU-38 JDAM  500 lb GPS
-    "sw_bomb_gbu39_v3",        -- GBU-39 SDB   small diameter
-    "sw_bomb_gbu12_v3",        -- GBU-12 Paveway II  500 lb LGB
-    "sw_bomb_gbu16_v3",        -- GBU-16 Paveway II  1000 lb LGB
-    "sw_bomb_gbu10_v3",        -- GBU-10 Paveway II  2000 lb LGB
-    "sw_bomb_gbu24_v3",        -- GBU-24 Paveway III 2000 lb LGB
-    "sw_bomb_gbu27_v3",        -- GBU-27 Paveway III penetrator
-    "sw_bomb_gbu28_v3",        -- GBU-28 Bunker Buster 5000 lb LGB
-    "sw_bomb_gbu48_v3",        -- GBU-48 Enhanced Paveway II 1000 lb
-    "sw_bomb_gbu49_v3",        -- GBU-49 Enhanced Paveway II 500 lb
-    "sw_bomb_gbu53_v3",        -- GBU-53 SDB II StormBreaker
-    "sw_bomb_gbu8_v3",         -- GBU-8 HOBOS EO-guided
-    "sw_bomb_agm154_v3",       -- AGM-154 JSOW standoff
-    "sw_bomb_agm62a_v3",       -- AGM-62 Walleye TV
-    "sw_bomb_gbu15_v3",        -- GBU-15 glide bomb
+    "sw_bomb_gbu31_v3",
+    "sw_bomb_gbu32_v3",
+    "sw_bomb_gbu38_v3",
+    "sw_bomb_gbu39_v3",
+    "sw_bomb_gbu12_v3",
+    "sw_bomb_gbu16_v3",
+    "sw_bomb_gbu10_v3",
+    "sw_bomb_gbu24_v3",
+    "sw_bomb_gbu27_v3",
+    "sw_bomb_gbu28_v3",
+    "sw_bomb_gbu48_v3",
+    "sw_bomb_gbu49_v3",
+    "sw_bomb_gbu53_v3",
+    "sw_bomb_gbu8_v3",
+    "sw_bomb_agm154_v3",
+    "sw_bomb_agm62a_v3",
+    "sw_bomb_gbu15_v3",
 }
 
 -- ---------- W2 — Heavy ordnance ----------
--- Massive bombs; terrible natural accuracy, devastating blast.
 local CFG_W2_Count   = 2
 local CFG_W2_Delay   = 4.0
 local CFG_W2_Scatter = 1800
 local CFG_W2_Pool    = {
-    "sw_bomb_gbu43_v3",        -- MOAB
-    "sw_bomb_gbu57_v3",        -- GBU-57 MOP 30000 lb
-    "sw_bomb_m118_v3",         -- M118 3000 lb demolition
-    "sw_bomb_anm56_v3",        -- AN-M56 4000 lb
-    "sw_bomb_anm66_v3",        -- AN-M66 2000 lb
-    "sw_bomb_mk84_v3",         -- Mk 84 2000 lb GP
-    "sw_bomb_mk84_air_v3",     -- Mk 84 AIR (chute handled by W6 when selected alone)
-    "sw_bomb_anmk1_v3",        -- AN-Mk 1 1600 lb AP
+    "sw_bomb_gbu43_v3",
+    "sw_bomb_gbu57_v3",
+    "sw_bomb_m118_v3",
+    "sw_bomb_anm56_v3",
+    "sw_bomb_anm66_v3",
+    "sw_bomb_mk84_v3",
+    "sw_bomb_mk84_air_v3",
+    "sw_bomb_anmk1_v3",
 }
 
 -- ---------- W3 — Medium carpet ----------
--- Workhorse bombs; 8-bomb carpet, per-shot scatter.
 local CFG_W3_Count   = 8
 local CFG_W3_Delay   = 0.4
 local CFG_W3_Scatter = 1200
 local CFG_W3_Pool    = {
-    "sw_bomb_mk82_v3",         -- Mk 82 500 lb GP
-    "sw_bomb_mk83_v3",         -- Mk 83 1000 lb GP
-    "sw_bomb_mk83_air_v3",     -- Mk 83 AIR variant
-    "sw_bomb_m117_v3",         -- M117 750 lb GP
-    "sw_bomb_hem32_v3",        -- HE M32 500 lb
-    "sw_bomb_hem31_v3",        -- HE M31 1000 lb
-    "sw_bomb_anm64_v3",        -- AN-M64 500 lb GP
-    "sw_bomb_anm65_v3",        -- AN-M65 1000 lb GP
-    "sw_bomb_anm65_m129_v3",   -- AN-M65 M129
-    "sw_bomb_anmk33_v3",       -- AN-Mk 33 1000 lb
-    "sw_bomb_anm57_v3",        -- AN-M57 250 lb GP
-    "sw_bomb_mk9_v3",          -- Mk 9 depth charge
-    "sw_bomb_m62_v3",          -- Mk 62 Quickstrike mine
-    "sw_bomb_m63_v3",          -- Mk 63 naval mine
+    "sw_bomb_mk82_v3",
+    "sw_bomb_mk83_v3",
+    "sw_bomb_mk83_air_v3",
+    "sw_bomb_m117_v3",
+    "sw_bomb_hem32_v3",
+    "sw_bomb_hem31_v3",
+    "sw_bomb_anm64_v3",
+    "sw_bomb_anm65_v3",
+    "sw_bomb_anm65_m129_v3",
+    "sw_bomb_anmk33_v3",
+    "sw_bomb_anm57_v3",
+    "sw_bomb_mk9_v3",
+    "sw_bomb_m62_v3",
+    "sw_bomb_m63_v3",
 }
 
 -- ---------- W4 — Light scattered ----------
--- Light GP bombs; high count, wide scatter.
 local CFG_W4_Count   = 12
 local CFG_W4_Delay   = 0.25
 local CFG_W4_Scatter = 1600
 local CFG_W4_Pool    = {
-    "sw_bomb_mk81_v3",         -- Mk 81 250 lb GP
-    "sw_bomb_anm30_v3",        -- AN-M30 100 lb GP
-    "sw_bomb_anm57_v3",        -- AN-M57 250 lb GP  (also in W3 — cross-pool is fine)
-    "sw_bomb_gbu39_v3",        -- GBU-39 SDB small diameter
-    "sw_bomb_gbu53_v3",        -- GBU-53 SDB II
+    "sw_bomb_mk81_v3",
+    "sw_bomb_anm30_v3",
+    "sw_bomb_anm57_v3",
+    "sw_bomb_gbu39_v3",
+    "sw_bomb_gbu53_v3",
 }
 
--- ---------- W5 — Hellfire (SW base missile) ----------
--- AGM-114 Hellfire anti-armour / anti-personnel.
--- The SW rocket base handles its own guidance.
-local CFG_W5_Entity  = "sw_missile_agm114_v3"   -- SW AGM-114 Hellfire
+-- ---------- W5 — Hellfire ----------
+local CFG_W5_Entity  = "sw_missile_agm114_v3"
 local CFG_W5_Count   = 4
 local CFG_W5_Delay   = 2.5
 local CFG_W5_Scatter = 80
--- Two wing-root muzzle hardpoints (local space)
 local CFG_W5_Muzzles = { Vector(60,-70,-8), Vector(60,70,-8) }
 
 -- ---------- W6 — Retarded / Parachute bombs ----------
--- All bombs that have "snakeye" or "air" in their classname.
--- On spawn we activate body-group 1 index 1 (chute/retarder blades).
--- These are thrown forward with aircraft speed; the chute creates enough
--- drag that they fall nearly vertically, landing close to the drop point.
--- The B-52 must already be roughly over the target for this window to work
--- well, which creates interesting gameplay — a slow, scary overpass.
 local CFG_W6_Count   = 6
 local CFG_W6_Delay   = 0.55
--- Scatter is tighter because chutes remove most horizontal speed
 local CFG_W6_Scatter = 600
 local CFG_W6_Pool    = {
-    "sw_bomb_mk81_snakeye_v3",  -- Mk 81 Snakeye  250 lb retarded
-    "sw_bomb_mk82_snakeye_v3",  -- Mk 82 Snakeye  500 lb retarded
-    "sw_bomb_mk82_air_v3",      -- Mk 82 AIR      500 lb retarded
-    "sw_bomb_mk84_air_v3",      -- Mk 84 AIR     2000 lb retarded
+    "sw_bomb_mk81_snakeye_v3",
+    "sw_bomb_mk82_snakeye_v3",
+    "sw_bomb_mk82_air_v3",
+    "sw_bomb_mk84_air_v3",
 }
 
 -- ============================================================
@@ -226,6 +222,8 @@ function ENT:Initialize()
     end
 
     self:SetModel("models/stuffs/boeingb52g/boeing_b52g_stratofortress.mdl")
+    -- Scale the visual model to 1.8x. Physics hull is unchanged.
+    self:SetModelScale(MODEL_SCALE)
     self:PhysicsInit(SOLID_VPHYSICS)
     self:SetMoveType(MOVETYPE_VPHYSICS)
     self:SetSolid(SOLID_VPHYSICS)
@@ -288,9 +286,9 @@ function ENT:Initialize()
     -- Per-weapon shot counters (reset each PickNewWeapon call)
     self.WPN_ShotsFired  = 0
     self.WPN_NextShot    = 0
-    self.WPN_MuzzleIndex = 1   -- W5 muzzle alternation
+    self.WPN_MuzzleIndex = 1
 
-    self:Debug("B-52 (SW-munitions) spawned. sky=" .. self.sky)
+    self:Debug("B-52 (SW-munitions, scale=" .. MODEL_SCALE .. ") spawned. sky=" .. self.sky)
 end
 
 -- ============================================================
@@ -360,7 +358,7 @@ end
 function ENT:Debug(msg) print("[Bombin B-52] " .. tostring(msg)) end
 
 -- ============================================================
--- THINK / PHYSICS UPDATE  (flight model unchanged)
+-- THINK / PHYSICS UPDATE
 -- ============================================================
 function ENT:Think()
     if not self.DieTime or not self.SpawnTime then
@@ -527,10 +525,6 @@ function ENT:GetPrimaryTarget()
     return closest
 end
 
--- Returns a world ground position aimed at the nearest player.
--- scatter: half-width of square horizontal randomisation (units).
--- NOTE: We intentionally use a square distribution here to match the
---       existing behaviour. A circular version would use VectorRand().
 function ENT:GetAimedGroundPos(scatter)
     scatter = scatter or 0
     local target = self:GetPrimaryTarget()
@@ -594,7 +588,7 @@ function ENT:PickNewWeapon(ct)
     end
 
     self.WPN_ShotsFired  = 0
-    self.WPN_NextShot    = ct + 0.5   -- 0.5 s lead-in before first release
+    self.WPN_NextShot    = ct + 0.5
     self.WPN_MuzzleIndex = 1
 
     self:Debug("Selected weapon window: " .. self.CurrentWeapon)
@@ -606,17 +600,6 @@ end
 
 -- CalcBallisticImpulse: compute the initial velocity vector for a dumb bomb
 -- released from dropPos so it reaches aimPos under gravity.
---
--- For SW bombs that have aerodynamic models (wings, fins) the SW physics
--- will correct the trajectory further — we only need a good starting vector.
---
--- Physics:
---   H         = max(dropPos.z - aimPos.z, 100)   height above target
---   fallTime  = sqrt(2 * H / GRAVITY_EST)
---   reqSpeed  = lateralDist / fallTime
---   clamped to [BALLISTIC_MIN_H, BALLISTIC_MAX_H]
---
--- The aircraft forward velocity is ADDED so the bomb inherits momentum.
 local function CalcBallisticImpulse(dropPos, aimPos, aircraftFwdVel)
     local H        = math.max(dropPos.z - aimPos.z, 100)
     local fallTime = math.sqrt(2 * H / GRAVITY_EST)
@@ -641,16 +624,17 @@ local function CalcBallisticImpulse(dropPos, aimPos, aircraftFwdVel)
     local vel = dir * reqSpeed
     vel.x = vel.x + aircraftFwdVel.x
     vel.y = vel.y + aircraftFwdVel.y
-    vel.z = -60   -- downward kick so physics starts falling immediately
+    vel.z = -60
     return vel
 end
 
--- SpawnSWBomb: spawn a SW bomb entity, orient it toward aimPos,
--- and apply a ballistic initial velocity.
--- Used by W1 (precision), W2 (heavy), W3 (medium), W4 (light).
+-- SpawnSWBomb: spawn a SW bomb entity and apply initial velocity.
 --
--- isRetarded: if true, activate body-group 1 slot 1 (chute/blades)
---             AND do NOT apply ballistic impulse — just inherit aircraft speed.
+-- isRetarded: activates body-group 1 slot 1 (chute/blades) AND
+--             applies a strong horizontal throw (CFG_W6_FwdMult x aircraft
+--             forward speed) instead of ballistic impulse. The deployed
+--             chute then kills most of the forward momentum and the bomb
+--             drops near-vertically onto the target.
 function ENT:SpawnSWBomb(entClass, dropPos, aimPos, isRetarded)
     local bomb = ents.Create(entClass)
     if not IsValid(bomb) then
@@ -662,8 +646,6 @@ function ENT:SpawnSWBomb(entClass, dropPos, aimPos, isRetarded)
     bomb.Launcher   = self
     bomb:SetOwner(self)
 
-    -- Orient nose toward the aim point so the SW aerodynamics start
-    -- in the right attitude immediately.
     local toTarget = aimPos - dropPos
     local dropAng
     if toTarget:LengthSqr() > 1 then
@@ -678,13 +660,10 @@ function ENT:SpawnSWBomb(entClass, dropPos, aimPos, isRetarded)
     bomb:Spawn()
     bomb:Activate()
 
-    -- Activate parachute / retarder blades for retarded bombs.
-    -- Body-group 1, value 1 = extended (open chute / deployed blades).
     if isRetarded then
         bomb:SetBodygroup(1, 1)
     end
 
-    -- Arm via SW base API (sets bomb.Armed = true and calls :Launch())
     if bomb.Arm then
         bomb:Arm()
     elseif bomb.Armed ~= nil then
@@ -697,12 +676,13 @@ function ENT:SpawnSWBomb(entClass, dropPos, aimPos, isRetarded)
         aircraftFwd.z = 0
 
         if isRetarded then
-            -- Retarded bombs: only inherit aircraft forward momentum.
-            -- The chute will arrest most of this speed and the bomb drops
-            -- almost straight down — which is correct retarder behaviour.
+            -- Strong forward throw: CFG_W6_FwdMult x cruise speed.
+            -- The chute arrests horizontal momentum after opening; the
+            -- multiplier ensures the bomb travels far enough forward to
+            -- land on (or past) the target rather than behind the aircraft.
             bPhys:SetVelocity(Vector(
-                aircraftFwd.x,
-                aircraftFwd.y,
+                aircraftFwd.x * CFG_W6_FwdMult,
+                aircraftFwd.y * CFG_W6_FwdMult,
                 -80
             ))
         else
@@ -711,7 +691,6 @@ function ENT:SpawnSWBomb(entClass, dropPos, aimPos, isRetarded)
         end
     end
 
-    -- Prevent self-collision with the aircraft for 0.6 s after release.
     constraint.NoCollide(bomb, self, 0, 0)
     local ref = bomb
     timer.Simple(0.6, function()
@@ -725,8 +704,6 @@ end
 
 -- ============================================================
 -- W1: PRECISION GUIDED WEAPONS
--- 4 bombs from the precision pool, slow cadence.
--- Small scatter — the guidance systems close the gap.
 -- ============================================================
 function ENT:UpdatePrecision(ct)
     if self.WPN_ShotsFired >= CFG_W1_Count then return true end
@@ -746,7 +723,6 @@ end
 
 -- ============================================================
 -- W2: HEAVY ORDNANCE
--- 2 massive bombs, wide scatter, enormous blast.
 -- ============================================================
 function ENT:UpdateHeavy(ct)
     if self.WPN_ShotsFired >= CFG_W2_Count then return true end
@@ -759,8 +735,6 @@ function ENT:UpdateHeavy(ct)
     local dropPos  = self:LocalToWorld(CFG_BombBayLocal)
     local aimPos   = self:GetAimedGroundPos(CFG_W2_Scatter)
 
-    -- If the selected heavy bomb is a retarded variant, activate its chute.
-    -- We detect this by the classname containing "_air" as a suffix.
     local isRetarded = string.find(entClass, "_air_v3", 1, true) ~= nil
 
     self:SpawnSWBomb(entClass, dropPos, aimPos, isRetarded)
@@ -770,7 +744,6 @@ end
 
 -- ============================================================
 -- W3: MEDIUM CARPET
--- 8 workhorse bombs, 0.4 s apart, per-shot independent aim.
 -- ============================================================
 function ENT:UpdateMedium(ct)
     if self.WPN_ShotsFired >= CFG_W3_Count then return true end
@@ -790,7 +763,6 @@ end
 
 -- ============================================================
 -- W4: LIGHT SCATTERED
--- 12 small bombs at high cadence.
 -- ============================================================
 function ENT:UpdateLight(ct)
     if self.WPN_ShotsFired >= CFG_W4_Count then return true end
@@ -810,10 +782,6 @@ end
 
 -- ============================================================
 -- W5: SW HELLFIRE MISSILE
--- AGM-114 Hellfire from the SW rocket base.
--- The SW base provides full guidance logic (LaserGuided, HaveGuidance).
--- We assign a target entity at launch so the missile guides autonomously.
--- Muzzle points alternate per shot.
 -- ============================================================
 function ENT:UpdateHellfire(ct)
     if self.WPN_ShotsFired >= CFG_W5_Count then return true end
@@ -822,12 +790,10 @@ function ENT:UpdateHellfire(ct)
     self.WPN_NextShot   = ct + CFG_W5_Delay
     self.WPN_ShotsFired = self.WPN_ShotsFired + 1
 
-    -- Alternate muzzle hardpoints
     local muzzleLocal = CFG_W5_Muzzles[self.WPN_MuzzleIndex]
     self.WPN_MuzzleIndex = (self.WPN_MuzzleIndex % #CFG_W5_Muzzles) + 1
     local muzzlePos = self:LocalToWorld(muzzleLocal)
 
-    -- Aim toward the closest player with small scatter
     local aimPos = self:GetAimedGroundPos(CFG_W5_Scatter)
     local aimDir = aimPos - muzzlePos
     if aimDir:LengthSqr() < 1 then
@@ -839,7 +805,6 @@ function ENT:UpdateHellfire(ct)
     local missile = ents.Create(CFG_W5_Entity)
     if not IsValid(missile) then
         self:Debug("W5 HELLFIRE: entity '" .. CFG_W5_Entity .. "' not found — is SW installed?")
-        -- Return true to skip this window rather than looping forever
         return true
     end
 
@@ -851,15 +816,12 @@ function ENT:UpdateHellfire(ct)
     missile:Spawn()
     missile:Activate()
 
-    -- Give the missile initial velocity (aircraft speed) so it doesn't
-    -- immediately stall before the rocket motor kicks in.
     local mPhys = missile:GetPhysicsObject()
     if IsValid(mPhys) then
         local fwd = Angle(0, self.flightYaw, 0):Forward() * self.Speed
         mPhys:SetVelocity(fwd)
     end
 
-    -- Prevent self-collision with the aircraft during the first 0.6 s.
     constraint.NoCollide(missile, self, 0, 0)
     local mRef = missile
     timer.Simple(0.6, function()
@@ -868,14 +830,8 @@ function ENT:UpdateHellfire(ct)
         end
     end)
 
-    -- Arm and launch via SW rocket base API, then set target.
-    -- The SW base guidance system takes over after this.
     timer.Simple(0.15, function()
         if not IsValid(mRef) then return end
-
-        -- Set target: trace toward the aim position and assign hit entity.
-        -- If no entity is hit, assign worldspawn so the guidance still
-        -- has a valid target to steer toward.
         local tr = util.TraceHull({
             start  = muzzlePos,
             endpos = muzzlePos + aimDir * 500000,
@@ -883,26 +839,20 @@ function ENT:UpdateHellfire(ct)
             maxs   = Vector(20,20,20),
             filter = { self, mRef }
         })
-
         if tr.Hit and IsValid(tr.Entity) then
             mRef.target       = tr.Entity
             mRef.targetOffset = tr.Entity:WorldToLocal(tr.HitPos)
         else
-            -- Target is the world: build a fake entity reference on worldspawn.
             mRef.target       = game.GetWorld()
             mRef.targetOffset = game.GetWorld():WorldToLocal(aimPos)
         end
-
         mRef.GuidanceActive = true
         mRef.HaveGuidance   = true
-
         if mRef.Armed ~= nil then mRef.Armed = true end
         if mRef.Launch then mRef:Launch() end
-
         mRef:SetCollisionGroup(COLLISION_GROUP_PROJECTILE)
     end)
 
-    -- Muzzle flash effect
     local ed = EffectData()
     ed:SetOrigin(muzzlePos)
     ed:SetAngles(self:GetAngles())
@@ -916,19 +866,6 @@ end
 
 -- ============================================================
 -- W6: RETARDED / PARACHUTE BOMBS
--- Bombs with "snakeye" or "air" in their classname have integrated
--- chutes / retarder blades (body-group 1, value 1).
---
--- Physics rationale:
---   At B-52 cruise speed (~260 u/s) the aircraft needs to be roughly
---   overhead the target. We give each bomb only the aircraft forward
---   velocity — the deployed chute creates enough drag that the bomb
---   decelerates to near-zero horizontal speed and falls almost straight
---   down onto the target. The scatter accounts for wind / imperfect
---   overpass timing.
---
--- The aim position is computed normally so the SCHEDULER ensures the
---   B-52 is orbiting above the correct area when this window fires.
 -- ============================================================
 function ENT:UpdateRetarded(ct)
     if self.WPN_ShotsFired >= CFG_W6_Count then return true end
@@ -941,8 +878,6 @@ function ENT:UpdateRetarded(ct)
     local dropPos  = self:LocalToWorld(CFG_BombBayLocal)
     local aimPos   = self:GetAimedGroundPos(CFG_W6_Scatter)
 
-    -- isRetarded = true: SpawnSWBomb will open the chute body-group
-    -- and give only forward-momentum, not ballistic impulse.
     self:SpawnSWBomb(entClass, dropPos, aimPos, true)
     self:Debug("W6 RETARDED " .. self.WPN_ShotsFired .. "/" .. CFG_W6_Count .. " " .. entClass)
     return (self.WPN_ShotsFired >= CFG_W6_Count)
