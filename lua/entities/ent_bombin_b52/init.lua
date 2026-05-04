@@ -3,14 +3,14 @@ AddCSLuaFile("cl_trailsystem.lua")
 AddCSLuaFile("shared.lua")
 include("shared.lua")
 
--- The B-52 model's nose points along its LOCAL +X axis.
--- GMod's Angle(p,y,r):Forward() is the LOCAL +X direction when r=0,p=0.
--- With MODEL_YAW_OFFSET = -90, the visual nose aligns with flightYaw.
--- Because the model is rotated 90 degrees relative to GMod's angle convention:
---   - "bank"  (wing tilt)    maps to GMod Angle.p  (pitch channel)
---   - "pitch" (nose up/down) maps to GMod Angle.r  (roll channel)
--- Roll sign is NEGATIVE: turning right -> positive turnRate -> positive SmoothedRoll -> negative p -> right wing down. Correct.
--- So final angle: Angle( -SmoothedRoll, flightYaw+OFFSET, -SmoothedPitch )
+-- ============================================================
+-- MODEL / FLIGHT ORIENTATION NOTES
+-- The B-52 model nose points along LOCAL +X.
+-- MODEL_YAW_OFFSET = -90 aligns the visual nose with flightYaw.
+-- bank  (wing tilt)   = GMod Angle.p   (negative sign: right turn -> right wing down)
+-- pitch (nose up/dn)  = GMod Angle.r
+-- Final angle: Angle( -SmoothedRoll, flightYaw+OFFSET, -SmoothedPitch )
+-- ============================================================
 local MODEL_YAW_OFFSET = -90
 
 local ROLL_SUSTAINED_GAIN = 2.2
@@ -19,68 +19,96 @@ local ROLL_MAX            = 22.0
 local ROLL_LERP_IN        = 0.08
 local ROLL_LERP_OUT       = 0.012
 
-local ENGINE_LOOP_SOUND  = "sound/b52/b52.wav"
-local SOUNDS_ATGM_IGNITE = { "ATGM.wav", "ATGM2.wav", "ATGM3.wav", "ATGM4.wav" }
-local SOUNDS_LAUNCH      = { "launch1.wav", "launch2.wav" }
-local SOUND_ROCKET_IDLE  = "rocket_idle.wav"
+local ENGINE_LOOP_SOUND = "sound/b52/b52.wav"
+
+local MODEL_SCALE = 1.8
 
 -- ============================================================
--- WEAPON CATALOGUE
+-- SW MUNITIONS CATALOGUE
 -- ============================================================
--- Each weapon entry drives a completely self-contained fire function.
--- Window system:
---   PEACEFUL (idle) window:   5-12 seconds  (no shooting)
---   ACTIVE   (weapon) window: driven per-weapon by its own shot sequence
---
--- Weapon IDs (string keys used in self.CurrentWeapon):
---   "massive"   -> W1: single huge bomb, terrible aim
---   "medium"    -> W2: 6 bombs from a random pool, per-shot scatter
---   "carpet"    -> W3: line of 8 x gb_bomb_250gp along flight path (pure drop, no impulse)
---   "cluster"   -> W4: 10 cluster munitions scattered wide
---   "vikhr"     -> W5: ATGM (unchanged from original)
+local CFG_MaxHP        = 450
+local CFG_FadeDuration = 3.0
+local CFG_PeacefulMin  = 6
+local CFG_PeacefulMax  = 14
 
-local CFG_MaxHP          = 450
-local CFG_FadeDuration   = 3.0
-local CFG_WeaponWindow   = 10   -- seconds per active weapon window
-local CFG_PeacefulMin    = 5    -- minimum peaceful gap between windows
-local CFG_PeacefulMax    = 12   -- maximum peaceful gap between windows
-
--- W1 - Massive ordnance
-local CFG_MASSIVE_Bombs  = { "gb_bomb_1000gp", "gb_bomb_2000gp" }
-local CFG_MASSIVE_Scatter = 2400   -- huge cone radius (units on ground)
-
--- W2 - Medium ordnance (6 bombs, each gets its own scatter)
-local CFG_MEDIUM_Bombs   = { "gb_bomb_500gp", "gb_bomb_mk82", "gb_bomb_mk77" }
-local CFG_MEDIUM_Count   = 6
-local CFG_MEDIUM_Delay   = 0.55   -- seconds between each of the 6 drops
-local CFG_MEDIUM_Scatter = 1400
-
--- W3 - Small ordnance: carpet line of gb_bomb_250gp
-local CFG_CARPET_Count   = 8     -- bombs in the line
-local CFG_CARPET_Delay   = 0.3   -- seconds between each bomb
-local CFG_CARPET_Spacing = 900   -- distance between footprints along flight vector
-
--- W4 - Cluster
-local CFG_CLUSTER_Bombs  = { "gb_bomb_cbu", "gb_bomb_cbubomblet" }
-local CFG_CLUSTER_Count  = 10
-local CFG_CLUSTER_Delay  = 0.25
-local CFG_CLUSTER_Scatter = 1600
-
--- W5 - VIKHR ATGM (original, unchanged)
-local CFG_VIKHR_Delay        = 4.0
-local CFG_VIKHR_Count        = 2
-local CFG_VIKHR_Scatter      = 60
-local CFG_VIKHR_MuzzlePoints = { Vector(60,-70,-5), Vector(60,70,-5) }
-
--- Bomb bay drop origin (roughly center belly of the aircraft)
 local CFG_BombBayLocal = Vector(0, 0, -35)
+local GRAVITY_EST      = 580
+local BALLISTIC_MIN_H  = 150
+local BALLISTIC_MAX_H  = 3200
 
--- Gravity constant used for ballistic impulse calculation.
--- GMod default physenv gravity is ~600 u/s^2 downward.
--- We use a slightly conservative value so bombs still arc realistically
--- even on servers with modified gravity.
-local GRAVITY_EST = 580
+-- ============================================================
+-- SAFETY CONSTANTS
+-- ============================================================
+-- How long (seconds) after drop before collisions are enabled and
+-- the bomb is allowed to arm/explode. Must be >= 1.0.
+local BOMB_ARM_DELAY     = 1.0
+-- Margin below self.sky where we silently kill a bomb that is
+-- still rising toward the skybox (prevents skybox detonations).
+local SKYBOX_KILL_MARGIN = 200
 
+-- ---------- W6 retarded ----------
+local CFG_W6_FwdMult = 3.5
+
+-- ---------- W1 ----------
+local CFG_W1_Count   = 4
+local CFG_W1_Delay   = 3.0
+local CFG_W1_Scatter = 300
+local CFG_W1_Pool    = {
+    "sw_bomb_gbu31_v3","sw_bomb_gbu32_v3","sw_bomb_gbu38_v3","sw_bomb_gbu39_v3",
+    "sw_bomb_gbu12_v3","sw_bomb_gbu16_v3","sw_bomb_gbu10_v3","sw_bomb_gbu24_v3",
+    "sw_bomb_gbu27_v3","sw_bomb_gbu28_v3","sw_bomb_gbu48_v3","sw_bomb_gbu49_v3",
+    "sw_bomb_gbu53_v3","sw_bomb_gbu8_v3", "sw_bomb_agm154_v3","sw_bomb_agm62a_v3",
+    "sw_bomb_gbu15_v3",
+}
+
+-- ---------- W2 ----------
+local CFG_W2_Count   = 2
+local CFG_W2_Delay   = 4.0
+local CFG_W2_Scatter = 1800
+local CFG_W2_Pool    = {
+    "sw_bomb_gbu43_v3","sw_bomb_gbu57_v3","sw_bomb_m118_v3","sw_bomb_anm56_v3",
+    "sw_bomb_anm66_v3","sw_bomb_mk84_v3", "sw_bomb_mk84_air_v3","sw_bomb_anmk1_v3",
+}
+
+-- ---------- W3 ----------
+local CFG_W3_Count   = 8
+local CFG_W3_Delay   = 0.4
+local CFG_W3_Scatter = 1200
+local CFG_W3_Pool    = {
+    "sw_bomb_mk82_v3","sw_bomb_mk83_v3","sw_bomb_mk83_air_v3","sw_bomb_m117_v3",
+    "sw_bomb_hem32_v3","sw_bomb_hem31_v3","sw_bomb_anm64_v3","sw_bomb_anm65_v3",
+    "sw_bomb_anm65_m129_v3","sw_bomb_anmk33_v3","sw_bomb_anm57_v3","sw_bomb_mk9_v3",
+    "sw_bomb_m62_v3","sw_bomb_m63_v3",
+}
+
+-- ---------- W4 ----------
+local CFG_W4_Count   = 12
+local CFG_W4_Delay   = 0.25
+local CFG_W4_Scatter = 1600
+local CFG_W4_Pool    = {
+    "sw_bomb_mk81_v3","sw_bomb_anm30_v3","sw_bomb_anm57_v3",
+    "sw_bomb_gbu39_v3","sw_bomb_gbu53_v3",
+}
+
+-- ---------- W5 Hellfire ----------
+local CFG_W5_Entity  = "sw_missile_agm114_v3"
+local CFG_W5_Count   = 4
+local CFG_W5_Delay   = 2.5
+local CFG_W5_Scatter = 80
+local CFG_W5_Muzzles = { Vector(60,-70,-8), Vector(60,70,-8) }
+
+-- ---------- W6 Retarded ----------
+local CFG_W6_Count   = 6
+local CFG_W6_Delay   = 0.55
+local CFG_W6_Scatter = 600
+local CFG_W6_Pool    = {
+    "sw_bomb_mk81_snakeye_v3","sw_bomb_mk82_snakeye_v3",
+    "sw_bomb_mk82_air_v3",    "sw_bomb_mk84_air_v3",
+}
+
+-- ============================================================
+-- NETWORK STRING
+-- ============================================================
 util.AddNetworkString("bombin_b52_damage_tier")
 
 local function CalcTier(hp, maxHP)
@@ -88,7 +116,10 @@ local function CalcTier(hp, maxHP)
     if f > 0.66 then return 0 elseif f > 0.33 then return 1 elseif f > 0 then return 2 else return 3 end
 end
 local function BroadcastTier(ent, tier)
-    net.Start("bombin_b52_damage_tier") net.WriteUInt(ent:EntIndex(),16) net.WriteUInt(tier,2) net.Broadcast()
+    net.Start("bombin_b52_damage_tier")
+    net.WriteUInt(ent:EntIndex(), 16)
+    net.WriteUInt(tier, 2)
+    net.Broadcast()
 end
 
 -- ============================================================
@@ -136,6 +167,7 @@ function ENT:Initialize()
     end
 
     self:SetModel("models/stuffs/boeingb52g/boeing_b52g_stratofortress.mdl")
+    self:SetModelScale(MODEL_SCALE)
     self:PhysicsInit(SOLID_VPHYSICS)
     self:SetMoveType(MOVETYPE_VPHYSICS)
     self:SetSolid(SOLID_VPHYSICS)
@@ -143,7 +175,7 @@ function ENT:Initialize()
     self:SetPos(spawnPos)
     self:SetBodygroup(1, 1)
     self:SetRenderMode(RENDERMODE_TRANSALPHA)
-    self:SetColor(Color(255,255,255,0))
+    self:SetColor(Color(255, 255, 255, 0))
 
     self:SetNWInt("HP",    self.MaxHP)
     self:SetNWInt("MaxHP", self.MaxHP)
@@ -169,8 +201,8 @@ function ENT:Initialize()
     self.TumbleStartTime   = 0
     self.TumbleGroundZ     = ground
     self.TumbleCrashed     = false
-    self.TumbleVelocity    = Vector(0,0,0)
-    self.TumbleAngVelocity = Vector(0,0,0)
+    self.TumbleVelocity    = Vector(0, 0, 0)
+    self.TumbleAngVelocity = Vector(0, 0, 0)
 
     self.IsDestroyed = false
     self.DamageTier  = 0
@@ -190,18 +222,14 @@ function ENT:Initialize()
         self.EngineLoop:Play()
     end
 
-    -- Weapon state
     self.CurrentWeapon   = nil
-    self.WeaponWindowEnd = 0
-    self.IsPeaceful      = false   -- true = we're in a peaceful gap right now
+    self.IsPeaceful      = false
     self.PeacefulUntil   = 0
-
-    -- Per-weapon shot counters (reset by PickNewWeapon)
     self.WPN_ShotsFired  = 0
     self.WPN_NextShot    = 0
-    self.WPN_MuzzleIndex = 1   -- used by VIKHR only
+    self.WPN_MuzzleIndex = 1
 
-    self:Debug("B-52 spawned at "..tostring(spawnPos).." sky="..self.sky.." OrbitDir="..self.OrbitDirection)
+    self:Debug("B-52 (SW-munitions, scale=" .. MODEL_SCALE .. ") spawned. sky=" .. self.sky)
 end
 
 -- ============================================================
@@ -213,20 +241,29 @@ function ENT:OnTakeDamage(dmginfo)
     local hp = self:GetNWInt("HP", self.MaxHP) - dmginfo:GetDamage()
     self:SetNWInt("HP", hp)
     local tier = CalcTier(hp, self.MaxHP)
-    if tier ~= self.DamageTier then self.DamageTier = tier BroadcastTier(self, tier) end
+    if tier ~= self.DamageTier then
+        self.DamageTier = tier
+        BroadcastTier(self, tier)
+    end
     if hp <= 0 then self:DestroyUAV() end
 end
 
 function ENT:StartTumble()
-    self.IsTumbling = true  self.TumbleStartTime = CurTime()  self.TumbleCrashed = false
+    self.IsTumbling      = true
+    self.TumbleStartTime = CurTime()
+    self.TumbleCrashed   = false
     local gnd = self:FindGround(self:GetPos())
     if gnd ~= -1 then self.TumbleGroundZ = gnd end
     local fwd = Angle(0, self.flightYaw, 0):Forward()
-    self.TumbleVelocity = Vector(fwd.x*(self.Speed or 260), fwd.y*(self.Speed or 260), -200)
-    local sign = function() return (math.random(2)==1) and 1 or -1 end
-    self.TumbleAngVelocity = Vector(math.Rand(80,200)*sign(), math.Rand(20,80)*sign(), math.Rand(150,400)*sign())
+    self.TumbleVelocity    = Vector(fwd.x*(self.Speed or 260), fwd.y*(self.Speed or 260), -200)
+    local function sign() return (math.random(2)==1) and 1 or -1 end
+    self.TumbleAngVelocity = Vector(
+        math.Rand(80,200)*sign(),
+        math.Rand(20,80)*sign(),
+        math.Rand(150,400)*sign()
+    )
     local pos = self:GetPos()
-    local ed = EffectData() ed:SetOrigin(pos) ed:SetScale(4) ed:SetMagnitude(4) ed:SetRadius(400)
+    local ed  = EffectData() ed:SetOrigin(pos) ed:SetScale(4) ed:SetMagnitude(4) ed:SetRadius(400)
     util.Effect("500lb_air", ed, true, true)
     sound.Play("ambient/explosions/explode_4.wav", pos, 135, 95, 1.0)
 end
@@ -249,16 +286,20 @@ function ENT:DestroyUAV()
     self.IsDestroyed = true
     if self.EngineLoop then
         self.EngineLoop:ChangeVolume(0, 0.3)
-        timer.Simple(0.4, function() if self.EngineLoop then self.EngineLoop:Stop() end end)
+        timer.Simple(0.4, function()
+            if self.EngineLoop then self.EngineLoop:Stop() end
+        end)
     end
     self:StartTumble()
-    timer.Simple(12, function() if IsValid(self) then self:CrashExplode() end end)
+    timer.Simple(12, function()
+        if IsValid(self) then self:CrashExplode() end
+    end)
 end
 
-function ENT:Debug(msg) print("[Bombin B-52] "..tostring(msg)) end
+function ENT:Debug(msg) print("[Bombin B-52] " .. tostring(msg)) end
 
 -- ============================================================
--- THINK / PHYSICS UPDATE (flight unchanged)
+-- THINK / PHYSICS UPDATE
 -- ============================================================
 function ENT:Think()
     if not self.DieTime or not self.SpawnTime then
@@ -266,7 +307,6 @@ function ENT:Think()
     end
     local ct = CurTime()
 
-    -- Tumble: only ground-check, no weapons
     if self.IsTumbling and not self.TumbleCrashed then
         local pos = self:GetPos()
         if pos.z <= (self.TumbleGroundZ or -16384)+150 then self:CrashExplode() return end
@@ -286,7 +326,6 @@ function ENT:Think()
     elseif left < self.FadeDuration then alpha = math.Clamp(255*(left/self.FadeDuration),0,255) end
     self:SetColor(Color(255,255,255,math.Round(alpha)))
 
-    -- Weapons only when not destroyed
     if not self.IsDestroyed then
         self:HandleWeaponSystem(ct)
     end
@@ -300,7 +339,7 @@ function ENT:PhysicsUpdate(phys)
 
     if self.IsTumbling then
         if self.TumbleCrashed then return end
-        local dt = engine.TickInterval()
+        local dt  = engine.TickInterval()
         self.TumbleVelocity.z = self.TumbleVelocity.z + physenv.GetGravity().z * dt
         local pos    = self:GetPos()
         local newPos = pos + self.TumbleVelocity * dt
@@ -316,7 +355,6 @@ function ENT:PhysicsUpdate(phys)
     local pos = self:GetPos()
     local dt  = engine.TickInterval()
 
-    -- Altitude drift
     if CurTime() >= self.AltDriftNextPick then
         self.AltDriftTarget   = self.sky - math.Rand(0, self.AltDriftRange)
         self.AltDriftNextPick = CurTime() + math.Rand(12, 30)
@@ -328,7 +366,6 @@ function ENT:PhysicsUpdate(phys)
         self.sky - self.AltDriftRange, self.sky
     )
 
-    -- Orbit steering
     local flatPos    = Vector(pos.x, pos.y, 0)
     local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
     local toCenter   = flatCenter - flatPos
@@ -367,11 +404,12 @@ function ENT:PhysicsUpdate(phys)
     local cross    = fwd2.x * desired2.y - fwd2.y * desired2.x
     local dot      = fwd2.x * desired2.x + fwd2.y * desired2.y
     local urgency  = (1 - dot) * 0.5
-    local turnRate = math.Clamp(cross * urgency * self.MaxTurnRate * 2,
-                                -self.MaxTurnRate, self.MaxTurnRate)
+    local turnRate = math.Clamp(
+        cross * urgency * self.MaxTurnRate * 2,
+        -self.MaxTurnRate, self.MaxTurnRate
+    )
 
-    self.flightYaw = self.flightYaw + turnRate * dt
-
+    self.flightYaw      = self.flightYaw + turnRate * dt
     local turnRateDelta = turnRate - self.PrevTurnRate
     self.PrevTurnRate   = turnRate
 
@@ -426,8 +464,6 @@ function ENT:GetPrimaryTarget()
     return closest
 end
 
--- Returns a ground position aimed at the closest player.
--- scatter: radius of random horizontal error in units.
 function ENT:GetAimedGroundPos(scatter)
     scatter = scatter or 0
     local target = self:GetPrimaryTarget()
@@ -451,12 +487,8 @@ function ENT:GetAimedGroundPos(scatter)
 end
 
 -- ============================================================
--- WEAPON SYSTEM - MASTER SCHEDULER
+-- WEAPON SYSTEM — MASTER SCHEDULER
 -- ============================================================
--- State machine:
---   IsPeaceful == true  -> wait until PeacefulUntil, then PickNewWeapon
---   IsPeaceful == false -> run the active weapon, when done enter peaceful
-
 function ENT:HandleWeaponSystem(ct)
     if self.IsPeaceful then
         if ct >= self.PeacefulUntil then
@@ -466,117 +498,158 @@ function ENT:HandleWeaponSystem(ct)
         return
     end
 
-    -- Active weapon: dispatch to the right update function
-    -- Each update function returns true when the weapon run is finished
     local done = false
-    if     self.CurrentWeapon == "massive" then done = self:UpdateMassive(ct)
-    elseif self.CurrentWeapon == "medium"  then done = self:UpdateMedium(ct)
-    elseif self.CurrentWeapon == "carpet"  then done = self:UpdateCarpet(ct)
-    elseif self.CurrentWeapon == "cluster" then done = self:UpdateCluster(ct)
-    elseif self.CurrentWeapon == "vikhr"   then done = self:UpdateVikhr(ct)
+    local w = self.CurrentWeapon
+    if     w == "precision" then done = self:UpdatePrecision(ct)
+    elseif w == "heavy"     then done = self:UpdateHeavy(ct)
+    elseif w == "medium"    then done = self:UpdateMedium(ct)
+    elseif w == "light"     then done = self:UpdateLight(ct)
+    elseif w == "hellfire"  then done = self:UpdateHellfire(ct)
+    elseif w == "retarded"  then done = self:UpdateRetarded(ct)
     else   done = true end
 
     if done then
-        -- Weapon run ended - start peaceful window
         self.IsPeaceful    = true
         self.CurrentWeapon = nil
         self.PeacefulUntil = ct + math.Rand(CFG_PeacefulMin, CFG_PeacefulMax)
-        self:Debug("Peaceful window until "..string.format("%.1f", self.PeacefulUntil))
+        self:Debug("Peaceful until " .. string.format("%.1f", self.PeacefulUntil))
     end
 end
 
 function ENT:PickNewWeapon(ct)
-    -- Equal weight on all 5 weapon types
-    local roll = math.random(1, 5)
-    if     roll == 1 then self.CurrentWeapon = "massive"
-    elseif roll == 2 then self.CurrentWeapon = "medium"
-    elseif roll == 3 then self.CurrentWeapon = "carpet"
-    elseif roll == 4 then self.CurrentWeapon = "cluster"
-    else                   self.CurrentWeapon = "vikhr"
+    local roll = math.random(1, 6)
+    if     roll == 1 then self.CurrentWeapon = "precision"
+    elseif roll == 2 then self.CurrentWeapon = "heavy"
+    elseif roll == 3 then self.CurrentWeapon = "medium"
+    elseif roll == 4 then self.CurrentWeapon = "light"
+    elseif roll == 5 then self.CurrentWeapon = "hellfire"
+    else                   self.CurrentWeapon = "retarded"
     end
 
     self.WPN_ShotsFired  = 0
-    self.WPN_NextShot    = ct + 0.5   -- small lead-in before first drop
+    self.WPN_NextShot    = ct + 0.5
     self.WPN_MuzzleIndex = 1
 
-    -- Carpet needs a pre-baked line direction at selection time
-    if self.CurrentWeapon == "carpet" then
-        self:BakeCarpetLine()
-    end
-
-    self:Debug("Weapon: "..self.CurrentWeapon)
+    self:Debug("Selected weapon window: " .. self.CurrentWeapon)
 end
 
 -- ============================================================
--- BOMB SPAWN HELPERS
+-- BOMB SAFETY HELPERS
 -- ============================================================
 
--- CalcBallisticImpulse: compute the horizontal velocity vector a bomb needs
--- so that, released from dropPos, it reaches aimPos under gravity.
+-- ApplyBombSafety: called immediately after every bomb/missile is spawned.
 --
--- Physics:
---   height H   = dropPos.z - aimPos.z   (positive = we are above the target)
---   fall time  t = sqrt(2*H / g)
---   required horizontal speed = lateral_distance / t
+-- Three guarantees:
+--   1. SELF-BOMB: CollisionGroup is set to COLLISION_GROUP_DEBRIS for
+--      BOMB_ARM_DELAY seconds. This makes the bomb pass through ALL
+--      entities (including the B-52 and other freshly-dropped bombs).
+--      After the delay it is restored to COLLISION_GROUP_NONE so it can
+--      hit the ground normally.
 --
--- We clamp the result to [minSpeed, maxSpeed] to stay physically plausible.
--- The aircraft's own forward velocity is ADDED on top so the bomb inherits
--- momentum and the arc looks natural.
-local BALLISTIC_MIN_HSPEED = 180    -- u/s  — minimum horizontal kick
-local BALLISTIC_MAX_HSPEED = 2800   -- u/s  — maximum horizontal kick (prevents teleporting)
+--   2. 1-SECOND ARM DELAY: Armed is forced false at spawn. The SW base
+--      explodes on PhysicsCollide only when Armed == true, so the bomb
+--      cannot detonate during the first second regardless of what it hits.
+--      Armed is set to true after BOMB_ARM_DELAY seconds.
+--
+--   3. SKYBOX GUARD: A lightweight Think hook monitors the bomb's altitude.
+--      If the bomb reaches (self.sky - SKYBOX_KILL_MARGIN) before arming,
+--      OR if it ever exits the world (util.IsInWorld == false), it is
+--      silently removed with no explosion.
+--      After the bomb is armed and falling the guard keeps watching: if the
+--      entity somehow climbs back toward the skybox (e.g. an explosion
+--      impulse) and is not yet on the ground, it is removed cleanly.
+--
+function ENT:ApplyBombSafety(bomb)
+    if not IsValid(bomb) then return end
+
+    local skyKillZ = self.sky - SKYBOX_KILL_MARGIN
+    local armAt    = CurTime() + BOMB_ARM_DELAY
+
+    -- Step 1 & 2: disable collisions and block arming for BOMB_ARM_DELAY s
+    bomb.Armed = false
+    bomb:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
+
+    -- Step 3: install a per-tick skybox / OOB guard on the bomb entity
+    -- We override OnTick (SW base calls it every Think) if available,
+    -- otherwise we hook Think directly.
+    local function skyGuard(b)
+        if not IsValid(b) then return end
+        local bpos = b:GetPos()
+        -- Out-of-world or hit skybox ceiling -> silently remove, no boom
+        if not util.IsInWorld(bpos) or bpos.z >= skyKillZ then
+            b:Remove()
+            return
+        end
+    end
+
+    if bomb.OnTick then
+        -- SW base provides OnTick() called each server Think tick
+        local origOnTick = bomb.OnTick
+        bomb.OnTick = function(b)
+            skyGuard(b)
+            if IsValid(b) then origOnTick(b) end
+        end
+    else
+        -- Fallback: hook Think directly
+        local origThink = bomb.Think
+        bomb.Think = function(b)
+            skyGuard(b)
+            if IsValid(b) and origThink then origThink(b) end
+        end
+    end
+
+    -- After BOMB_ARM_DELAY: restore normal collision group and arm the bomb
+    local ref = bomb
+    timer.Simple(BOMB_ARM_DELAY, function()
+        if not IsValid(ref) then return end
+        ref:SetCollisionGroup(COLLISION_GROUP_NONE)
+        ref.Armed = true
+    end)
+end
+
+-- ============================================================
+-- SHARED BOMB SPAWN HELPERS
+-- ============================================================
 
 local function CalcBallisticImpulse(dropPos, aimPos, aircraftFwdVel)
-    -- Height above aim point. Clamp to at least 100 u so sqrt stays valid.
-    local H = math.max(dropPos.z - aimPos.z, 100)
-
-    -- Time to free-fall that height under GRAVITY_EST
+    local H        = math.max(dropPos.z - aimPos.z, 100)
     local fallTime = math.sqrt(2 * H / GRAVITY_EST)
 
-    -- Flat vector from drop point to aim point (ignore Z)
     local dx = aimPos.x - dropPos.x
     local dy = aimPos.y - dropPos.y
     local lateralDist = math.sqrt(dx*dx + dy*dy)
 
-    -- Required horizontal speed to cover that distance in fallTime
-    local reqSpeed = lateralDist / fallTime
+    local reqSpeed = math.Clamp(
+        lateralDist / fallTime,
+        BALLISTIC_MIN_H, BALLISTIC_MAX_H
+    )
 
-    -- Clamp to sane bounds
-    reqSpeed = math.Clamp(reqSpeed, BALLISTIC_MIN_HSPEED, BALLISTIC_MAX_HSPEED)
-
-    -- Direction (normalized flat vector toward aim point)
     local dir
     if lateralDist > 1 then
         dir = Vector(dx / lateralDist, dy / lateralDist, 0)
     else
-        -- Bomb is directly above the aim — give it a tiny random horizontal nudge
         local a = math.Rand(0, math.pi * 2)
         dir = Vector(math.cos(a), math.sin(a), 0)
     end
 
-    -- Final velocity = ballistic horizontal component + aircraft forward carry + downward bias
     local vel = dir * reqSpeed
     vel.x = vel.x + aircraftFwdVel.x
     vel.y = vel.y + aircraftFwdVel.y
-    vel.z = -60   -- small downward kick so physics starts falling immediately
-
+    vel.z = -60
     return vel
 end
 
--- SpawnBomb: aimed drop with ballistic impulse. Used by W1, W2, W4.
--- dropPos:   world spawn position (bomb bay)
--- aimPos:    world ground target point
--- entClass:  gredwitch bomb classname
-function ENT:SpawnBomb(entClass, dropPos, aimPos)
+function ENT:SpawnSWBomb(entClass, dropPos, aimPos, isRetarded)
     local bomb = ents.Create(entClass)
     if not IsValid(bomb) then
-        self:Debug("WARN: failed to create entity '"..tostring(entClass).."'")
+        self:Debug("WARN: failed to create '" .. tostring(entClass) .. "'")
         return nil
     end
 
     bomb.IsOnPlane = true
+    bomb.Launcher  = self
     bomb:SetOwner(self)
 
-    -- Orient nose toward aim point
     local toTarget = aimPos - dropPos
     local dropAng
     if toTarget:LengthSqr() > 1 then
@@ -591,260 +664,207 @@ function ENT:SpawnBomb(entClass, dropPos, aimPos)
     bomb:Spawn()
     bomb:Activate()
 
-    bomb.Armed = false
-    bomb:Arm()
+    if isRetarded then
+        bomb:SetBodygroup(1, 1)
+    end
+
+    -- Apply all three safety guarantees (collision delay, arm delay, skybox guard)
+    self:ApplyBombSafety(bomb)
 
     local bPhys = bomb:GetPhysicsObject()
     if IsValid(bPhys) then
-        -- Aircraft forward velocity (horizontal only — Z is handled inside CalcBallisticImpulse)
         local aircraftFwd = Angle(0, self.flightYaw, 0):Forward() * self.Speed
         aircraftFwd.z = 0
-        local vel = CalcBallisticImpulse(dropPos, aimPos, aircraftFwd)
-        bPhys:SetVelocity(vel)
-    end
 
-    constraint.NoCollide(bomb, self, 0, 0)
-    local ref = bomb
-    timer.Simple(0.6, function()
-        if IsValid(ref) and IsValid(self) then
-            constraint.RemoveConstraints(ref, "NoCollide")
+        if isRetarded then
+            bPhys:SetVelocity(Vector(
+                aircraftFwd.x * CFG_W6_FwdMult,
+                aircraftFwd.y * CFG_W6_FwdMult,
+                -80
+            ))
+        else
+            local vel = CalcBallisticImpulse(dropPos, aimPos, aircraftFwd)
+            bPhys:SetVelocity(vel)
         end
-    end)
-
-    return bomb
-end
-
--- SpawnBombDrop: pure gravity drop — NO ballistic impulse.
--- Used by W3 (carpet bombing) where the aircraft flies over the line
--- and bombs fall straight down along the flight path naturally.
--- The aircraft forward velocity is still inherited so the bomb doesn't
--- immediately fall behind, but no extra steering impulse is added.
-function ENT:SpawnBombDrop(entClass, dropPos, aimPos)
-    local bomb = ents.Create(entClass)
-    if not IsValid(bomb) then
-        self:Debug("WARN: failed to create entity '"..tostring(entClass).."'")
-        return nil
     end
-
-    bomb.IsOnPlane = true
-    bomb:SetOwner(self)
-
-    local toTarget = aimPos - dropPos
-    local dropAng
-    if toTarget:LengthSqr() > 1 then
-        toTarget:Normalize()
-        dropAng = toTarget:Angle()
-    else
-        dropAng = Angle(90, 0, 0)
-    end
-
-    bomb:SetPos(dropPos)
-    bomb:SetAngles(dropAng)
-    bomb:Spawn()
-    bomb:Activate()
-
-    bomb.Armed = false
-    bomb:Arm()
-
-    local bPhys = bomb:GetPhysicsObject()
-    if IsValid(bPhys) then
-        local fwdVel = Angle(0, self.flightYaw, 0):Forward() * self.Speed
-        fwdVel.z = -80
-        bPhys:SetVelocity(fwdVel)
-    end
-
-    constraint.NoCollide(bomb, self, 0, 0)
-    local ref = bomb
-    timer.Simple(0.6, function()
-        if IsValid(ref) and IsValid(self) then
-            constraint.RemoveConstraints(ref, "NoCollide")
-        end
-    end)
 
     return bomb
 end
 
 -- ============================================================
--- W1: MASSIVE ORDNANCE
--- Single bomb, 1000gp or 2000gp, terrible aim.
--- Returns true when the single drop is done.
+-- W1: PRECISION GUIDED WEAPONS
 -- ============================================================
-function ENT:UpdateMassive(ct)
-    if self.WPN_ShotsFired >= 1 then return true end
+function ENT:UpdatePrecision(ct)
+    if self.WPN_ShotsFired >= CFG_W1_Count then return true end
     if ct < self.WPN_NextShot then return false end
 
-    self.WPN_ShotsFired = 1
-
-    local entClass  = CFG_MASSIVE_Bombs[math.random(#CFG_MASSIVE_Bombs)]
-    local dropPos   = self:LocalToWorld(CFG_BombBayLocal)
-    local aimPos    = self:GetAimedGroundPos(CFG_MASSIVE_Scatter)
-
-    self:SpawnBomb(entClass, dropPos, aimPos)
-    self:Debug("W1 MASSIVE: "..entClass)
-    return true
-end
-
--- ============================================================
--- W2: MEDIUM ORDNANCE
--- 6 bombs from the pool, each with independent scatter + independent aim point.
--- Returns true once all 6 are dropped.
--- ============================================================
-function ENT:UpdateMedium(ct)
-    if self.WPN_ShotsFired >= CFG_MEDIUM_Count then return true end
-    if ct < self.WPN_NextShot then return false end
-
-    self.WPN_NextShot    = ct + CFG_MEDIUM_Delay
-    self.WPN_ShotsFired  = self.WPN_ShotsFired + 1
-
-    local entClass  = CFG_MEDIUM_Bombs[math.random(#CFG_MEDIUM_Bombs)]
-    local dropPos   = self:LocalToWorld(CFG_BombBayLocal)
-    local aimPos    = self:GetAimedGroundPos(CFG_MEDIUM_Scatter)
-
-    self:SpawnBomb(entClass, dropPos, aimPos)
-    self:Debug("W2 MEDIUM shot "..self.WPN_ShotsFired.."/"..CFG_MEDIUM_Count.." "..entClass)
-    return (self.WPN_ShotsFired >= CFG_MEDIUM_Count)
-end
-
--- ============================================================
--- W3: CARPET BOMBING LINE
--- 8 x gb_bomb_250gp dropped along the aircraft's current flight track.
--- Uses SpawnBombDrop (pure gravity) — no ballistic impulse.
--- BakeCarpetLine() pre-calculates 8 world ground aim points at PickNewWeapon time.
--- Returns true once all bombs are dropped.
--- ============================================================
-function ENT:BakeCarpetLine()
-    local center  = self:GetAimedGroundPos(0)
-    local fwdDir  = Angle(0, self.flightYaw, 0):Forward()
-    fwdDir.z = 0
-    if fwdDir:LengthSqr() < 0.001 then fwdDir = Vector(1,0,0) end
-    fwdDir:Normalize()
-
-    local half = math.floor(CFG_CARPET_Count / 2)
-    self.CarpetLine = {}
-    for i = 1, CFG_CARPET_Count do
-        local step   = (i - 1 - half + 0.5)
-        local pt     = center + fwdDir * (step * CFG_CARPET_Spacing)
-        self.CarpetLine[i] = pt
-    end
-end
-
-function ENT:UpdateCarpet(ct)
-    if self.WPN_ShotsFired >= CFG_CARPET_Count then return true end
-    if ct < self.WPN_NextShot then return false end
-
-    self.WPN_NextShot   = ct + CFG_CARPET_Delay
+    self.WPN_NextShot   = ct + CFG_W1_Delay
     self.WPN_ShotsFired = self.WPN_ShotsFired + 1
 
-    local dropPos = self:LocalToWorld(CFG_BombBayLocal)
-    local aimPos  = self.CarpetLine and self.CarpetLine[self.WPN_ShotsFired] or self:GetAimedGroundPos(200)
-
-    self:SpawnBombDrop("gb_bomb_250gp", dropPos, aimPos)
-    self:Debug("W3 CARPET bomb "..self.WPN_ShotsFired.."/"..CFG_CARPET_Count)
-    return (self.WPN_ShotsFired >= CFG_CARPET_Count)
-end
-
--- ============================================================
--- W4: CLUSTER MUNITIONS
--- 10 bombs scattered widely. Each is independently aimed.
--- Returns true once all 10 are dropped.
--- ============================================================
-function ENT:UpdateCluster(ct)
-    if self.WPN_ShotsFired >= CFG_CLUSTER_Count then return true end
-    if ct < self.WPN_NextShot then return false end
-
-    self.WPN_NextShot    = ct + CFG_CLUSTER_Delay
-    self.WPN_ShotsFired  = self.WPN_ShotsFired + 1
-
-    local entClass = CFG_CLUSTER_Bombs[math.random(#CFG_CLUSTER_Bombs)]
+    local entClass = CFG_W1_Pool[math.random(#CFG_W1_Pool)]
     local dropPos  = self:LocalToWorld(CFG_BombBayLocal)
-    local aimPos   = self:GetAimedGroundPos(CFG_CLUSTER_Scatter)
+    local aimPos   = self:GetAimedGroundPos(CFG_W1_Scatter)
 
-    self:SpawnBomb(entClass, dropPos, aimPos)
-    self:Debug("W4 CLUSTER shot "..self.WPN_ShotsFired.."/"..CFG_CLUSTER_Count.." "..entClass)
-    return (self.WPN_ShotsFired >= CFG_CLUSTER_Count)
+    self:SpawnSWBomb(entClass, dropPos, aimPos, false)
+    self:Debug("W1 PRECISION " .. self.WPN_ShotsFired .. "/" .. CFG_W1_Count .. " " .. entClass)
+    return (self.WPN_ShotsFired >= CFG_W1_Count)
 end
 
 -- ============================================================
--- W5: VIKHR ATGM (original logic, unchanged except return value)
--- Returns true when both missiles are fired.
+-- W2: HEAVY ORDNANCE
 -- ============================================================
-function ENT:UpdateVikhr(ct)
-    if self.WPN_ShotsFired >= CFG_VIKHR_Count then return true end
+function ENT:UpdateHeavy(ct)
+    if self.WPN_ShotsFired >= CFG_W2_Count then return true end
     if ct < self.WPN_NextShot then return false end
 
-    self.WPN_NextShot    = ct + CFG_VIKHR_Delay
-    self.WPN_ShotsFired  = self.WPN_ShotsFired + 1
+    self.WPN_NextShot   = ct + CFG_W2_Delay
+    self.WPN_ShotsFired = self.WPN_ShotsFired + 1
 
-    local muzzleLocal = CFG_VIKHR_MuzzlePoints[self.WPN_MuzzleIndex]
-    self.WPN_MuzzleIndex = (self.WPN_MuzzleIndex % #CFG_VIKHR_MuzzlePoints) + 1
+    local entClass   = CFG_W2_Pool[math.random(#CFG_W2_Pool)]
+    local dropPos    = self:LocalToWorld(CFG_BombBayLocal)
+    local aimPos     = self:GetAimedGroundPos(CFG_W2_Scatter)
+    local isRetarded = string.find(entClass, "_air_v3", 1, true) ~= nil
+
+    self:SpawnSWBomb(entClass, dropPos, aimPos, isRetarded)
+    self:Debug("W2 HEAVY " .. self.WPN_ShotsFired .. "/" .. CFG_W2_Count .. " " .. entClass)
+    return (self.WPN_ShotsFired >= CFG_W2_Count)
+end
+
+-- ============================================================
+-- W3: MEDIUM CARPET
+-- ============================================================
+function ENT:UpdateMedium(ct)
+    if self.WPN_ShotsFired >= CFG_W3_Count then return true end
+    if ct < self.WPN_NextShot then return false end
+
+    self.WPN_NextShot   = ct + CFG_W3_Delay
+    self.WPN_ShotsFired = self.WPN_ShotsFired + 1
+
+    local entClass = CFG_W3_Pool[math.random(#CFG_W3_Pool)]
+    local dropPos  = self:LocalToWorld(CFG_BombBayLocal)
+    local aimPos   = self:GetAimedGroundPos(CFG_W3_Scatter)
+
+    self:SpawnSWBomb(entClass, dropPos, aimPos, false)
+    self:Debug("W3 MEDIUM " .. self.WPN_ShotsFired .. "/" .. CFG_W3_Count .. " " .. entClass)
+    return (self.WPN_ShotsFired >= CFG_W3_Count)
+end
+
+-- ============================================================
+-- W4: LIGHT SCATTERED
+-- ============================================================
+function ENT:UpdateLight(ct)
+    if self.WPN_ShotsFired >= CFG_W4_Count then return true end
+    if ct < self.WPN_NextShot then return false end
+
+    self.WPN_NextShot   = ct + CFG_W4_Delay
+    self.WPN_ShotsFired = self.WPN_ShotsFired + 1
+
+    local entClass = CFG_W4_Pool[math.random(#CFG_W4_Pool)]
+    local dropPos  = self:LocalToWorld(CFG_BombBayLocal)
+    local aimPos   = self:GetAimedGroundPos(CFG_W4_Scatter)
+
+    self:SpawnSWBomb(entClass, dropPos, aimPos, false)
+    self:Debug("W4 LIGHT " .. self.WPN_ShotsFired .. "/" .. CFG_W4_Count .. " " .. entClass)
+    return (self.WPN_ShotsFired >= CFG_W4_Count)
+end
+
+-- ============================================================
+-- W5: SW HELLFIRE MISSILE
+-- ============================================================
+function ENT:UpdateHellfire(ct)
+    if self.WPN_ShotsFired >= CFG_W5_Count then return true end
+    if ct < self.WPN_NextShot then return false end
+
+    self.WPN_NextShot   = ct + CFG_W5_Delay
+    self.WPN_ShotsFired = self.WPN_ShotsFired + 1
+
+    local muzzleLocal = CFG_W5_Muzzles[self.WPN_MuzzleIndex]
+    self.WPN_MuzzleIndex = (self.WPN_MuzzleIndex % #CFG_W5_Muzzles) + 1
     local muzzlePos = self:LocalToWorld(muzzleLocal)
 
-    local targetPos = self:GetAimedGroundPos(CFG_VIKHR_Scatter)
-    local dir = targetPos - muzzlePos
-    if dir:LengthSqr() < 1 then return false end
-    dir:Normalize()
+    local aimPos = self:GetAimedGroundPos(CFG_W5_Scatter)
+    local aimDir = aimPos - muzzlePos
+    if aimDir:LengthSqr() < 1 then
+        self:Debug("W5 HELLFIRE: degenerate aim vector, skip")
+        return false
+    end
+    aimDir:Normalize()
 
-    local rocket = ents.Create("gb_9k121_rocket")
-    if not IsValid(rocket) then self:Debug("gb_9k121_rocket failed") return false end
+    local missile = ents.Create(CFG_W5_Entity)
+    if not IsValid(missile) then
+        self:Debug("W5 HELLFIRE: entity '" .. CFG_W5_Entity .. "' not found — is SW installed?")
+        return true
+    end
 
-    rocket:SetPos(muzzlePos)  rocket:SetAngles(dir:Angle())  rocket:SetOwner(self)  rocket.IsOnPlane=true
-    rocket:Spawn()  rocket:Activate()
-    rocket.Armed=true  rocket.ShouldExplode=true  rocket.ShouldExplodeOnImpact=true
-    rocket:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
+    missile:SetPos(muzzlePos)
+    missile:SetAngles(aimDir:Angle())
+    missile:SetOwner(self)
+    missile.IsOnPlane = true
+    missile.Launcher  = self
+    missile:Spawn()
+    missile:Activate()
 
-    -- Trace for JDAM guidance
-    local startpos = self:LocalToWorld(self:OBBCenter())
-    local tr = util.TraceHull({start=startpos, endpos=startpos+dir*500000,
-                               mins=Vector(-25,-25,-25), maxs=Vector(25,25,25), filter=self})
-    local rPhys = rocket:GetPhysicsObject()
-    if IsValid(rPhys) then rPhys:SetVelocity(Angle(0,self.flightYaw,0):Forward() * self.Speed) end
+    -- Apply safety (collision delay + arm delay + skybox guard)
+    self:ApplyBombSafety(missile)
 
-    constraint.NoCollide(rocket, self, 0, 0)
-    local ref = rocket
-    timer.Simple(0.25, function()
-        if not IsValid(ref) then return end
-        if tr.Hit then
-            ref.JDAM         = true
-            ref.target       = tr.Entity
-            ref.targetOffset = IsValid(tr.Entity) and tr.Entity:WorldToLocal(tr.HitPos) or tr.HitPos
-            ref.dropping     = true
+    local mPhys = missile:GetPhysicsObject()
+    if IsValid(mPhys) then
+        local fwd = Angle(0, self.flightYaw, 0):Forward() * self.Speed
+        mPhys:SetVelocity(fwd)
+    end
+
+    -- After arm delay: activate guidance
+    local mRef = missile
+    timer.Simple(BOMB_ARM_DELAY + 0.05, function()
+        if not IsValid(mRef) then return end
+        local tr = util.TraceHull({
+            start  = muzzlePos,
+            endpos = muzzlePos + aimDir * 500000,
+            mins   = Vector(-20,-20,-20),
+            maxs   = Vector(20,20,20),
+            filter = { self, mRef }
+        })
+        if tr.Hit and IsValid(tr.Entity) then
+            mRef.target       = tr.Entity
+            mRef.targetOffset = tr.Entity:WorldToLocal(tr.HitPos)
+        else
+            mRef.target       = game.GetWorld()
+            mRef.targetOffset = game.GetWorld():WorldToLocal(aimPos)
         end
-        ref.Armed = true  ref:Launch()  ref:SetCollisionGroup(0)
+        mRef.GuidanceActive = true
+        mRef.HaveGuidance   = true
+        if mRef.Launch then mRef:Launch() end
+        mRef:SetCollisionGroup(COLLISION_GROUP_PROJECTILE)
     end)
 
-    -- Muzzle FX
-    local ed = EffectData() ed:SetOrigin(muzzlePos) ed:SetAngles(self:GetAngles()) ed:SetEntity(self)
+    local ed = EffectData()
+    ed:SetOrigin(muzzlePos)
+    ed:SetAngles(self:GetAngles())
+    ed:SetEntity(self)
     util.Effect("gred_particle_aircraft_muzzle", ed, true, true)
-    -- NOTE: Sound level fixed to 110 (original had 0 here, a copy-paste bug)
-    sound.Play(table.Random(SOUNDS_ATGM_IGNITE), muzzlePos, 110, math.random(95,105), 1.0)
-    timer.Simple(0.1, function()
-        if IsValid(rocket) then
-            sound.Play(table.Random(SOUNDS_LAUNCH), rocket:GetPos(), 105, math.random(95,105), 1.0)
-        end
-    end)
+    sound.Play("sw/rocket/rocket_start_01.wav", muzzlePos, 110, math.random(95,105), 1.0)
 
-    rocket.IdleSound = CreateSound(rocket, SOUND_ROCKET_IDLE)
-    if rocket.IdleSound then
-        rocket.IdleSound:Play()
-        rocket.IdleSound:ChangePitch(math.random(85,110),0)
-        rocket.IdleSound:ChangeVolume(0.9,0)
-    end
-    local oldR = rocket.OnRemove
-    rocket.OnRemove = function(s)
-        if oldR then oldR(s) end
-        if s.IdleSound then s.IdleSound:Stop() end
-    end
-    local oldE = rocket.OnExplode
-    rocket.OnExplode = function(s,p,n)
-        if oldE then oldE(s,p,n) end
-        if s.IdleSound then s.IdleSound:Stop() end
-        local hp = p or s:GetPos()
-        local e1=EffectData() e1:SetOrigin(hp) e1:SetScale(4) e1:SetMagnitude(4) e1:SetRadius(400) util.Effect("500lb_air",e1,true,true)
-        local e2=EffectData() e2:SetOrigin(hp+Vector(0,0,60)) e2:SetScale(3) e2:SetMagnitude(3) e2:SetRadius(300) util.Effect("500lb_air",e2,true,true)
-        local e3=EffectData() e3:SetOrigin(hp) e3:SetScale(4) e3:SetMagnitude(4) e3:SetRadius(400) util.Effect("HelicopterMegaBomb",e3,true,true)
-    end
+    self:Debug("W5 HELLFIRE " .. self.WPN_ShotsFired .. "/" .. CFG_W5_Count)
+    return (self.WPN_ShotsFired >= CFG_W5_Count)
+end
 
-    return (self.WPN_ShotsFired >= CFG_VIKHR_Count)
+-- ============================================================
+-- W6: RETARDED / PARACHUTE BOMBS
+-- ============================================================
+function ENT:UpdateRetarded(ct)
+    if self.WPN_ShotsFired >= CFG_W6_Count then return true end
+    if ct < self.WPN_NextShot then return false end
+
+    self.WPN_NextShot   = ct + CFG_W6_Delay
+    self.WPN_ShotsFired = self.WPN_ShotsFired + 1
+
+    local entClass = CFG_W6_Pool[math.random(#CFG_W6_Pool)]
+    local dropPos  = self:LocalToWorld(CFG_BombBayLocal)
+    local aimPos   = self:GetAimedGroundPos(CFG_W6_Scatter)
+
+    self:SpawnSWBomb(entClass, dropPos, aimPos, true)
+    self:Debug("W6 RETARDED " .. self.WPN_ShotsFired .. "/" .. CFG_W6_Count .. " " .. entClass)
+    return (self.WPN_ShotsFired >= CFG_W6_Count)
 end
 
 -- ============================================================
@@ -868,6 +888,8 @@ end
 function ENT:OnRemove()
     if self.EngineLoop then
         self.EngineLoop:ChangeVolume(0, 0.5)
-        timer.Simple(0.6, function() if self.EngineLoop then self.EngineLoop:Stop() end end)
+        timer.Simple(0.6, function()
+            if self.EngineLoop then self.EngineLoop:Stop() end
+        end)
     end
 end
