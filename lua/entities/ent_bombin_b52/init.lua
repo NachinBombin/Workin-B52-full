@@ -84,7 +84,7 @@ local TARGET_PASS_BIAS           = 0.55
 -- ---------- W1 — Precision guided ----------
 local CFG_W1_Count   = 4
 local CFG_W1_Delay   = 3.0
-local CFG_W1_Scatter = 300
+local CFG_W1_Scatter = 80   -- GPS/LGB: near-pinpoint, minimal jitter
 local CFG_W1_Pool    = {
     "sw_bomb_gbu31_v3",
     "sw_bomb_gbu32_v3",
@@ -108,7 +108,7 @@ local CFG_W1_Pool    = {
 -- ---------- W2 — Heavy ordnance ----------
 local CFG_W2_Count   = 2
 local CFG_W2_Delay   = 4.0
-local CFG_W2_Scatter = 1800
+local CFG_W2_Scatter = 400  -- heavy GP: small aim uncertainty
 local CFG_W2_Pool    = {
     "sw_bomb_gbu43_v3",
     "sw_bomb_gbu57_v3",
@@ -123,7 +123,7 @@ local CFG_W2_Pool    = {
 -- ---------- W3 — Medium carpet ----------
 local CFG_W3_Count   = 8
 local CFG_W3_Delay   = 0.4
-local CFG_W3_Scatter = 1200
+local CFG_W3_Scatter = 350  -- carpet run: slight spread along track
 local CFG_W3_Pool    = {
     "sw_bomb_mk82_v3",
     "sw_bomb_mk83_v3",
@@ -144,7 +144,7 @@ local CFG_W3_Pool    = {
 -- ---------- W4 — Light scattered ----------
 local CFG_W4_Count   = 12
 local CFG_W4_Delay   = 0.25
-local CFG_W4_Scatter = 1600
+local CFG_W4_Scatter = 500  -- light cluster: wider spread, still on target
 local CFG_W4_Pool    = {
     "sw_bomb_mk81_v3",
     "sw_bomb_anm30_v3",
@@ -157,13 +157,13 @@ local CFG_W4_Pool    = {
 local CFG_W5_Entity  = "sw_missile_agm114_v3"
 local CFG_W5_Count   = 4
 local CFG_W5_Delay   = 2.5
-local CFG_W5_Scatter = 80
+local CFG_W5_Scatter = 80   -- guided missile: unchanged
 local CFG_W5_Muzzles = { Vector(60,-70,-8), Vector(60,70,-8) }
 
 -- ---------- W6 — Retarded / Parachute bombs ----------
 local CFG_W6_Count   = 6
 local CFG_W6_Delay   = 0.55
-local CFG_W6_Scatter = 600
+local CFG_W6_Scatter = 250  -- chute bombs: moderate accuracy
 local CFG_W6_Pool    = {
     "sw_bomb_mk81_snakeye_v3",
     "sw_bomb_mk82_snakeye_v3",
