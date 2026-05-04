@@ -71,6 +71,16 @@ local BALLISTIC_MAX_H = 3200
 -- speed but the horizontal kick has already placed it on target.
 local CFG_W6_FwdMult = 3.5
 
+-- Orbit / target-tracking tuning.
+local TARGET_ORBIT_RADIUS        = 1800
+local TARGET_ORBIT_RADIUS_MIN    = 1200
+local TARGET_ORBIT_RADIUS_MAX    = 2600
+local TARGET_CENTER_LERP         = 0.035
+local TARGET_LOOKAHEAD_TIME      = 2.25
+local TARGET_MAX_LOOKAHEAD_DIST  = 1200
+local TARGET_REACQUIRE_INTERVAL  = 0.35
+local TARGET_PASS_BIAS           = 0.55
+
 -- ---------- W1 — Precision guided ----------
 local CFG_W1_Count   = 4
 local CFG_W1_Delay   = 3.0
@@ -185,7 +195,7 @@ function ENT:Initialize()
     self.CallDir      = self:GetVar("CallDir",      Vector(1,0,0))
     self.Lifetime     = self:GetVar("Lifetime",     120)
     self.Speed        = self:GetVar("Speed",        260)
-    self.OrbitRadius  = self:GetVar("OrbitRadius",  4200)
+    self.OrbitRadius  = self:GetVar("OrbitRadius",  TARGET_ORBIT_RADIUS)
     self.SkyHeightAdd = self:GetVar("SkyHeightAdd", 7000)
 
     self.MaxHP        = CFG_MaxHP
@@ -202,13 +212,20 @@ function ENT:Initialize()
     self.DieTime   = CurTime() + self.Lifetime
     self.SpawnTime = CurTime()
 
+    self.OrbitRadius = math.Clamp(self.OrbitRadius, TARGET_ORBIT_RADIUS_MIN, TARGET_ORBIT_RADIUS_MAX)
+    self.DynamicCenterPos = Vector(self.CenterPos.x, self.CenterPos.y, self.CenterPos.z)
+    self.TargetEnt = nil
+    self.TargetVel = Vector(0, 0, 0)
+    self.LastTargetSampleTime = CurTime()
+    self.NextTargetRefresh = 0
+
     self.OrbitDirection = (math.random(2) == 1) and 1 or -1
 
     local right   = Vector(-self.CallDir.y, self.CallDir.x, 0)
     local tangent = Vector(right.x * self.OrbitDirection, right.y * self.OrbitDirection, 0)
     tangent:Normalize()
 
-    local spawnOffset = tangent * (-self.OrbitRadius * math.Rand(0.55, 0.95))
+    local spawnOffset = tangent * (-self.OrbitRadius * math.Rand(0.75, 1.05))
     local spawnPos    = Vector(
         self.CenterPos.x + spawnOffset.x,
         self.CenterPos.y + spawnOffset.y,
@@ -250,8 +267,8 @@ function ENT:Initialize()
     self.JitterPhase      = math.Rand(0, math.pi * 2)
     self.JitterAmplitude  = 8
 
-    self.RadialGain  = 0.5
-    self.MaxTurnRate = 28
+    self.RadialGain  = 0.9
+    self.MaxTurnRate = 34
 
     self.IsTumbling        = false
     self.TumbleStartTime   = 0
@@ -357,6 +374,61 @@ end
 
 function ENT:Debug(msg) print("[Bombin B-52] " .. tostring(msg)) end
 
+function ENT:UpdateTrackedTarget(ct)
+    if ct < (self.NextTargetRefresh or 0) and IsValid(self.TargetEnt) then return self.TargetEnt end
+
+    self.NextTargetRefresh = ct + TARGET_REACQUIRE_INTERVAL
+
+    local closest, closestDist = nil, math.huge
+    local selfPos = self:GetPos()
+    for _, ply in ipairs(player.GetAll()) do
+        if not IsValid(ply) or not ply:Alive() then continue end
+        local d = ply:GetPos():DistToSqr(selfPos)
+        if d < closestDist then
+            closestDist = d
+            closest = ply
+        end
+    end
+
+    self.TargetEnt = closest
+    return closest
+end
+
+function ENT:GetTargetOrbitCenter(ct)
+    local target = self:UpdateTrackedTarget(ct)
+    local desiredCenter = Vector(self.CenterPos.x, self.CenterPos.y, self.CenterPos.z)
+
+    if IsValid(target) then
+        local tpos = target:GetPos()
+        local tvel = target.GetVelocity and target:GetVelocity() or Vector(0, 0, 0)
+        tvel.z = 0
+        local lookAhead = math.min(tvel:Length() * TARGET_LOOKAHEAD_TIME, TARGET_MAX_LOOKAHEAD_DIST)
+        desiredCenter = tpos + tvel:GetNormalized() * lookAhead
+        desiredCenter.z = tpos.z
+        self.TargetVel = tvel
+        self.LastTargetSampleTime = ct
+    end
+
+    self.DynamicCenterPos = LerpVector(TARGET_CENTER_LERP, self.DynamicCenterPos or desiredCenter, desiredCenter)
+    self.CenterPos = self.DynamicCenterPos
+    return self.DynamicCenterPos, target
+end
+
+function ENT:GetPredictedTargetPos(dropPos, fallbackPos)
+    local target = self:GetPrimaryTarget()
+    if not IsValid(target) then return fallbackPos end
+
+    local targetPos = target:GetPos()
+    local targetVel = target.GetVelocity and target:GetVelocity() or Vector(0, 0, 0)
+    targetVel.z = 0
+
+    local H = math.max(dropPos.z - targetPos.z, 100)
+    local fallTime = math.sqrt(2 * H / GRAVITY_EST)
+    local predicted = targetPos + targetVel * fallTime
+    predicted.z = targetPos.z
+    return predicted
+end
+
 -- ============================================================
 -- THINK / PHYSICS UPDATE
 -- ============================================================
@@ -426,9 +498,10 @@ function ENT:PhysicsUpdate(phys)
         self.sky - self.AltDriftRange, self.sky
     )
 
-    -- Orbit steering
+    -- Orbit steering biased around the moving target instead of a static center.
+    local dynamicCenter = self:GetTargetOrbitCenter(CurTime())
     local flatPos    = Vector(pos.x, pos.y, 0)
-    local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
+    local flatCenter = Vector(dynamicCenter.x, dynamicCenter.y, 0)
     local toCenter   = flatCenter - flatPos
     local dist       = toCenter:Length()
 
@@ -444,14 +517,24 @@ function ENT:PhysicsUpdate(phys)
     end
     tangentDir:Normalize()
 
+    local targetBiasDir = radialDir
+    local target = self.TargetEnt
+    if IsValid(target) then
+        local targetFlat = Vector(target:GetPos().x, target:GetPos().y, 0)
+        local toTarget = targetFlat - flatPos
+        if toTarget:LengthSqr() > 1 then
+            targetBiasDir = toTarget:GetNormalized()
+        end
+    end
+
     local radialError = 0
     if self.OrbitRadius > 0 then
         radialError = math.Clamp((dist - self.OrbitRadius) / self.OrbitRadius, -1, 1)
     end
 
     local desired2 = Vector(
-        tangentDir.x + radialDir.x * radialError * self.RadialGain,
-        tangentDir.y + radialDir.y * radialError * self.RadialGain,
+        tangentDir.x + radialDir.x * radialError * self.RadialGain + targetBiasDir.x * TARGET_PASS_BIAS,
+        tangentDir.y + radialDir.y * radialError * self.RadialGain + targetBiasDir.y * TARGET_PASS_BIAS,
         0
     )
     if desired2:LengthSqr() < 0.001 then desired2 = tangentDir end
@@ -460,11 +543,11 @@ function ENT:PhysicsUpdate(phys)
     local fwdAngle = Angle(0, self.flightYaw, 0)
     local fwd3     = fwdAngle:Forward()
     local fwd2     = Vector(fwd3.x, fwd3.y, 0)
-    fwd2:Normalize()
+    if fwd2:LengthSqr() > 0 then fwd2:Normalize() end
 
     local cross    = fwd2.x * desired2.y - fwd2.y * desired2.x
-    local dot      = fwd2.x * desired2.x + fwd2.y * desired2.y
-    local urgency  = (1 - dot) * 0.5
+    local dot      = math.Clamp(fwd2.x * desired2.x + fwd2.y * desired2.y, -1, 1)
+    local urgency  = 0.35 + (1 - dot) * 0.65
     local turnRate = math.Clamp(
         cross * urgency * self.MaxTurnRate * 2,
         -self.MaxTurnRate, self.MaxTurnRate
@@ -516,10 +599,14 @@ end
 -- TARGET ACQUISITION
 -- ============================================================
 function ENT:GetPrimaryTarget()
+    local target = self:UpdateTrackedTarget(CurTime())
+    if IsValid(target) then return target end
+
     local closest, closestDist = nil, math.huge
+    local selfPos = self:GetPos()
     for _, ply in ipairs(player.GetAll()) do
         if not IsValid(ply) or not ply:Alive() then continue end
-        local d = ply:GetPos():DistToSqr(self.CenterPos)
+        local d = ply:GetPos():DistToSqr(selfPos)
         if d < closestDist then closestDist = d  closest = ply end
     end
     return closest
@@ -530,7 +617,7 @@ function ENT:GetAimedGroundPos(scatter)
     local target = self:GetPrimaryTarget()
     local base
     if IsValid(target) then
-        base = target:GetPos()
+        base = self:GetPredictedTargetPos(self:LocalToWorld(CFG_BombBayLocal), target:GetPos())
     else
         local tr = util.QuickTrace(
             Vector(self.CenterPos.x, self.CenterPos.y, self.sky),
