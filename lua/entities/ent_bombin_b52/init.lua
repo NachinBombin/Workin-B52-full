@@ -35,7 +35,7 @@ local SOUND_ROCKET_IDLE  = "rocket_idle.wav"
 -- Weapon IDs (string keys used in self.CurrentWeapon):
 --   "massive"   -> W1: single huge bomb, terrible aim
 --   "medium"    -> W2: 6 bombs from a random pool, per-shot scatter
---   "carpet"    -> W3: line of 8 x gb_bomb_250gp along flight path
+--   "carpet"    -> W3: line of 8 x gb_bomb_250gp along flight path (pure drop, no impulse)
 --   "cluster"   -> W4: 10 cluster munitions scattered wide
 --   "vikhr"     -> W5: ATGM (unchanged from original)
 
@@ -74,6 +74,12 @@ local CFG_VIKHR_MuzzlePoints = { Vector(60,-70,-5), Vector(60,70,-5) }
 
 -- Bomb bay drop origin (roughly center belly of the aircraft)
 local CFG_BombBayLocal = Vector(0, 0, -35)
+
+-- Gravity constant used for ballistic impulse calculation.
+-- GMod default physenv gravity is ~600 u/s^2 downward.
+-- We use a slightly conservative value so bombs still arc realistically
+-- even on servers with modified gravity.
+local GRAVITY_EST = 580
 
 util.AddNetworkString("bombin_b52_damage_tier")
 
@@ -502,12 +508,64 @@ function ENT:PickNewWeapon(ct)
 end
 
 -- ============================================================
--- SHARED BOMB SPAWN HELPER
--- Spawns a gredwitch bomb dropped from the bomb bay.
--- dropPos:   world position the bomb is spawned at
--- aimPos:    world ground point the bomb should land near (used for initial velocity aim)
--- entClass:  string entity classname (e.g. "gb_bomb_1000gp")
+-- BOMB SPAWN HELPERS
 -- ============================================================
+
+-- CalcBallisticImpulse: compute the horizontal velocity vector a bomb needs
+-- so that, released from dropPos, it reaches aimPos under gravity.
+--
+-- Physics:
+--   height H   = dropPos.z - aimPos.z   (positive = we are above the target)
+--   fall time  t = sqrt(2*H / g)
+--   required horizontal speed = lateral_distance / t
+--
+-- We clamp the result to [minSpeed, maxSpeed] to stay physically plausible.
+-- The aircraft's own forward velocity is ADDED on top so the bomb inherits
+-- momentum and the arc looks natural.
+local BALLISTIC_MIN_HSPEED = 180    -- u/s  — minimum horizontal kick
+local BALLISTIC_MAX_HSPEED = 2800   -- u/s  — maximum horizontal kick (prevents teleporting)
+
+local function CalcBallisticImpulse(dropPos, aimPos, aircraftFwdVel)
+    -- Height above aim point. Clamp to at least 100 u so sqrt stays valid.
+    local H = math.max(dropPos.z - aimPos.z, 100)
+
+    -- Time to free-fall that height under GRAVITY_EST
+    local fallTime = math.sqrt(2 * H / GRAVITY_EST)
+
+    -- Flat vector from drop point to aim point (ignore Z)
+    local dx = aimPos.x - dropPos.x
+    local dy = aimPos.y - dropPos.y
+    local lateralDist = math.sqrt(dx*dx + dy*dy)
+
+    -- Required horizontal speed to cover that distance in fallTime
+    local reqSpeed = lateralDist / fallTime
+
+    -- Clamp to sane bounds
+    reqSpeed = math.Clamp(reqSpeed, BALLISTIC_MIN_HSPEED, BALLISTIC_MAX_HSPEED)
+
+    -- Direction (normalized flat vector toward aim point)
+    local dir
+    if lateralDist > 1 then
+        dir = Vector(dx / lateralDist, dy / lateralDist, 0)
+    else
+        -- Bomb is directly above the aim — give it a tiny random horizontal nudge
+        local a = math.Rand(0, math.pi * 2)
+        dir = Vector(math.cos(a), math.sin(a), 0)
+    end
+
+    -- Final velocity = ballistic horizontal component + aircraft forward carry + downward bias
+    local vel = dir * reqSpeed
+    vel.x = vel.x + aircraftFwdVel.x
+    vel.y = vel.y + aircraftFwdVel.y
+    vel.z = -60   -- small downward kick so physics starts falling immediately
+
+    return vel
+end
+
+-- SpawnBomb: aimed drop with ballistic impulse. Used by W1, W2, W4.
+-- dropPos:   world spawn position (bomb bay)
+-- aimPos:    world ground target point
+-- entClass:  gredwitch bomb classname
 function ENT:SpawnBomb(entClass, dropPos, aimPos)
     local bomb = ents.Create(entClass)
     if not IsValid(bomb) then
@@ -515,18 +573,17 @@ function ENT:SpawnBomb(entClass, dropPos, aimPos)
         return nil
     end
 
-    -- Mark as aircraft-dropped so base_bomb:Initialize() doesn't block it
     bomb.IsOnPlane = true
     bomb:SetOwner(self)
 
-    -- Orient the bomb nose-down toward the aimed ground point.
+    -- Orient nose toward aim point
     local toTarget = aimPos - dropPos
     local dropAng
     if toTarget:LengthSqr() > 1 then
         toTarget:Normalize()
         dropAng = toTarget:Angle()
     else
-        dropAng = Angle(90, 0, 0)   -- straight down
+        dropAng = Angle(90, 0, 0)
     end
 
     bomb:SetPos(dropPos)
@@ -534,20 +591,68 @@ function ENT:SpawnBomb(entClass, dropPos, aimPos)
     bomb:Spawn()
     bomb:Activate()
 
-    -- Arm immediately (ArmDelay in shared is 0.1-0.5s on most bombs; ArmInternal will flip Armed)
     bomb.Armed = false
     bomb:Arm()
 
-    -- Give the bomb the aircraft's horizontal velocity so it doesn't drop straight
-    -- and continues slightly in the flight direction, plus a slight downward kick.
+    local bPhys = bomb:GetPhysicsObject()
+    if IsValid(bPhys) then
+        -- Aircraft forward velocity (horizontal only — Z is handled inside CalcBallisticImpulse)
+        local aircraftFwd = Angle(0, self.flightYaw, 0):Forward() * self.Speed
+        aircraftFwd.z = 0
+        local vel = CalcBallisticImpulse(dropPos, aimPos, aircraftFwd)
+        bPhys:SetVelocity(vel)
+    end
+
+    constraint.NoCollide(bomb, self, 0, 0)
+    local ref = bomb
+    timer.Simple(0.6, function()
+        if IsValid(ref) and IsValid(self) then
+            constraint.RemoveConstraints(ref, "NoCollide")
+        end
+    end)
+
+    return bomb
+end
+
+-- SpawnBombDrop: pure gravity drop — NO ballistic impulse.
+-- Used by W3 (carpet bombing) where the aircraft flies over the line
+-- and bombs fall straight down along the flight path naturally.
+-- The aircraft forward velocity is still inherited so the bomb doesn't
+-- immediately fall behind, but no extra steering impulse is added.
+function ENT:SpawnBombDrop(entClass, dropPos, aimPos)
+    local bomb = ents.Create(entClass)
+    if not IsValid(bomb) then
+        self:Debug("WARN: failed to create entity '"..tostring(entClass).."'")
+        return nil
+    end
+
+    bomb.IsOnPlane = true
+    bomb:SetOwner(self)
+
+    local toTarget = aimPos - dropPos
+    local dropAng
+    if toTarget:LengthSqr() > 1 then
+        toTarget:Normalize()
+        dropAng = toTarget:Angle()
+    else
+        dropAng = Angle(90, 0, 0)
+    end
+
+    bomb:SetPos(dropPos)
+    bomb:SetAngles(dropAng)
+    bomb:Spawn()
+    bomb:Activate()
+
+    bomb.Armed = false
+    bomb:Arm()
+
     local bPhys = bomb:GetPhysicsObject()
     if IsValid(bPhys) then
         local fwdVel = Angle(0, self.flightYaw, 0):Forward() * self.Speed
-        fwdVel.z = fwdVel.z - 80   -- downward bias so it actually falls
+        fwdVel.z = -80
         bPhys:SetVelocity(fwdVel)
     end
 
-    -- Prevent self-collision for a moment
     constraint.NoCollide(bomb, self, 0, 0)
     local ref = bomb
     timer.Simple(0.6, function()
@@ -565,7 +670,7 @@ end
 -- Returns true when the single drop is done.
 -- ============================================================
 function ENT:UpdateMassive(ct)
-    if self.WPN_ShotsFired >= 1 then return true end   -- already dropped
+    if self.WPN_ShotsFired >= 1 then return true end
     if ct < self.WPN_NextShot then return false end
 
     self.WPN_ShotsFired = 1
@@ -576,7 +681,7 @@ function ENT:UpdateMassive(ct)
 
     self:SpawnBomb(entClass, dropPos, aimPos)
     self:Debug("W1 MASSIVE: "..entClass)
-    return true   -- one-shot, done immediately
+    return true
 end
 
 -- ============================================================
@@ -591,7 +696,6 @@ function ENT:UpdateMedium(ct)
     self.WPN_NextShot    = ct + CFG_MEDIUM_Delay
     self.WPN_ShotsFired  = self.WPN_ShotsFired + 1
 
-    -- Each bomb gets its own random class AND its own independent scatter direction
     local entClass  = CFG_MEDIUM_Bombs[math.random(#CFG_MEDIUM_Bombs)]
     local dropPos   = self:LocalToWorld(CFG_BombBayLocal)
     local aimPos    = self:GetAimedGroundPos(CFG_MEDIUM_Scatter)
@@ -604,14 +708,12 @@ end
 -- ============================================================
 -- W3: CARPET BOMBING LINE
 -- 8 x gb_bomb_250gp dropped along the aircraft's current flight track.
+-- Uses SpawnBombDrop (pure gravity) — no ballistic impulse.
 -- BakeCarpetLine() pre-calculates 8 world ground aim points at PickNewWeapon time.
--- Each subsequent bomb is aimed at the next point in the line.
 -- Returns true once all bombs are dropped.
 -- ============================================================
 function ENT:BakeCarpetLine()
-    -- The line is built along the current flight vector on the ground.
-    -- Center of the line = player ground position. Each step = CFG_CARPET_Spacing.
-    local center  = self:GetAimedGroundPos(0)   -- aimed, no scatter
+    local center  = self:GetAimedGroundPos(0)
     local fwdDir  = Angle(0, self.flightYaw, 0):Forward()
     fwdDir.z = 0
     if fwdDir:LengthSqr() < 0.001 then fwdDir = Vector(1,0,0) end
@@ -620,7 +722,7 @@ function ENT:BakeCarpetLine()
     local half = math.floor(CFG_CARPET_Count / 2)
     self.CarpetLine = {}
     for i = 1, CFG_CARPET_Count do
-        local step   = (i - 1 - half + 0.5)   -- -half+0.5 to half+0.5 gives symmetric spread
+        local step   = (i - 1 - half + 0.5)
         local pt     = center + fwdDir * (step * CFG_CARPET_Spacing)
         self.CarpetLine[i] = pt
     end
@@ -636,7 +738,7 @@ function ENT:UpdateCarpet(ct)
     local dropPos = self:LocalToWorld(CFG_BombBayLocal)
     local aimPos  = self.CarpetLine and self.CarpetLine[self.WPN_ShotsFired] or self:GetAimedGroundPos(200)
 
-    self:SpawnBomb("gb_bomb_250gp", dropPos, aimPos)
+    self:SpawnBombDrop("gb_bomb_250gp", dropPos, aimPos)
     self:Debug("W3 CARPET bomb "..self.WPN_ShotsFired.."/"..CFG_CARPET_Count)
     return (self.WPN_ShotsFired >= CFG_CARPET_Count)
 end
