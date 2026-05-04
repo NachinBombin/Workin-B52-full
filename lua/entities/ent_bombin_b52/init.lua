@@ -21,31 +21,39 @@ local ROLL_LERP_OUT       = 0.012
 
 local ENGINE_LOOP_SOUND = "sound/b52/b52.wav"
 
--- Model scale applied in Initialize.
--- All collision / physics still use the base vphysics hull;
--- SetModelScale is visual only but makes the aircraft feel massive.
 local MODEL_SCALE = 1.8
 
 -- ============================================================
 -- SW MUNITIONS CATALOGUE
 -- ============================================================
--- DESIGN PHILOSOPHY:
---   SW bombs have real aerodynamic models baked into their physics.
---   Wings create authentic drag so these weapons glide / steer naturally.
---   We therefore ONLY pass an initial velocity vector that is physically
---   plausible, then let the SW physics do the rest.
---   For retarded/parachute bombs ("snakeye" / "air" in the classname)
---   we activate the chute body-group (bg 1 = 1) and give a purely
---   forward-momentum throw; the chute does the aiming work.
+-- AIMING PHILOSOPHY:
+--   W1/W2/W4: dart-throw. CalcDartVelocity fires a normalized vector
+--   straight from the drop point to the predicted target position at
+--   DART_SPEED. No gravity compensation, no horizontal clamp.
+--   The bomb simply homes in like a projectile.
+--
+--   W3 medium: ballistic carpet drop. Bombs are given a forward throw
+--   and spread via scatter so they form a straddle pattern.
+--
+--   W5 hellfire: guided missile, unchanged.
+--   W6 retarded: dart-aimed with chute deployed; the chute naturally
+--   bleeds off speed after opening.
 --
 -- Window IDs:
---   W1 "precision"  — GPS / LGB / glide weapons (JDAM, Paveway, JSOW …)
---   W2 "heavy"      — heavy GP / penetrators (Mk 84, M118, GBU-57 …)
---   W3 "medium"     — medium GP workhorse bombs (Mk 82, Mk 83, M117 …)
---   W4 "light"      — light GP / sub-250 lb weapons (Mk 81, AN-M30 …)
---   W5 "hellfire"   — AGM-114 Hellfire from SW base
---   W6 "retarded"   — parachute / retarder bombs (Snakeye, AIR)
+--   W1 "precision"  — GPS / LGB / glide weapons
+--   W2 "heavy"      — heavy GP / penetrators
+--   W3 "medium"     — medium GP carpet bombs
+--   W4 "light"      — light GP / sub-250 lb weapons
+--   W5 "hellfire"   — AGM-114 Hellfire
+--   W6 "retarded"   — parachute / retarder bombs
 -- ============================================================
+
+-- Dart throw speed (u/s). All non-carpet non-missile weapons use this.
+-- High enough to close 7000 units of altitude quickly.
+local DART_SPEED = 4500
+
+-- Gravity estimate used only by W3 carpet ballistic drop.
+local GRAVITY_EST = 580
 
 -- ---------- General config ----------
 local CFG_MaxHP        = 450
@@ -55,21 +63,6 @@ local CFG_PeacefulMax  = 14
 
 -- Bomb bay drop origin (belly of aircraft, local space)
 local CFG_BombBayLocal = Vector(0, 0, -35)
-
--- Gravity estimate for ballistic lead calculation.
-local GRAVITY_EST = 580
-
--- Min/max clamped horizontal release speed.
-local BALLISTIC_MIN_H = 150
-local BALLISTIC_MAX_H = 3200
-
--- Retarded bombs: multiplier on the aircraft forward speed that is
--- imparted at release BEFORE the chute opens.
--- At 1.0 the bomb inherits cruise speed only (260 u/s).
--- Raising this to 3.5 gives a strong forward throw so the bomb lands
--- well ahead of the drop point — the chute then arrests vertical
--- speed but the horizontal kick has already placed it on target.
-local CFG_W6_FwdMult = 3.5
 
 -- Orbit / target-tracking tuning.
 local TARGET_ORBIT_RADIUS        = 1800
@@ -84,7 +77,7 @@ local TARGET_PASS_BIAS           = 0.55
 -- ---------- W1 — Precision guided ----------
 local CFG_W1_Count   = 4
 local CFG_W1_Delay   = 3.0
-local CFG_W1_Scatter = 80   -- GPS/LGB: near-pinpoint, minimal jitter
+local CFG_W1_Scatter = 0
 local CFG_W1_Pool    = {
     "sw_bomb_gbu31_v3",
     "sw_bomb_gbu32_v3",
@@ -108,7 +101,7 @@ local CFG_W1_Pool    = {
 -- ---------- W2 — Heavy ordnance ----------
 local CFG_W2_Count   = 2
 local CFG_W2_Delay   = 4.0
-local CFG_W2_Scatter = 400  -- heavy GP: small aim uncertainty
+local CFG_W2_Scatter = 0
 local CFG_W2_Pool    = {
     "sw_bomb_gbu43_v3",
     "sw_bomb_gbu57_v3",
@@ -120,10 +113,10 @@ local CFG_W2_Pool    = {
     "sw_bomb_anmk1_v3",
 }
 
--- ---------- W3 — Medium carpet ----------
+-- ---------- W3 — Medium carpet (ballistic drop, spread intended) ----------
 local CFG_W3_Count   = 8
 local CFG_W3_Delay   = 0.4
-local CFG_W3_Scatter = 350  -- carpet run: slight spread along track
+local CFG_W3_Scatter = 600  -- carpet: intentional spread pattern
 local CFG_W3_Pool    = {
     "sw_bomb_mk82_v3",
     "sw_bomb_mk83_v3",
@@ -144,7 +137,7 @@ local CFG_W3_Pool    = {
 -- ---------- W4 — Light scattered ----------
 local CFG_W4_Count   = 12
 local CFG_W4_Delay   = 0.25
-local CFG_W4_Scatter = 500  -- light cluster: wider spread, still on target
+local CFG_W4_Scatter = 150  -- small spread, still dart-aimed
 local CFG_W4_Pool    = {
     "sw_bomb_mk81_v3",
     "sw_bomb_anm30_v3",
@@ -157,13 +150,13 @@ local CFG_W4_Pool    = {
 local CFG_W5_Entity  = "sw_missile_agm114_v3"
 local CFG_W5_Count   = 4
 local CFG_W5_Delay   = 2.5
-local CFG_W5_Scatter = 80   -- guided missile: unchanged
+local CFG_W5_Scatter = 80
 local CFG_W5_Muzzles = { Vector(60,-70,-8), Vector(60,70,-8) }
 
 -- ---------- W6 — Retarded / Parachute bombs ----------
 local CFG_W6_Count   = 6
 local CFG_W6_Delay   = 0.55
-local CFG_W6_Scatter = 250  -- chute bombs: moderate accuracy
+local CFG_W6_Scatter = 100
 local CFG_W6_Pool    = {
     "sw_bomb_mk81_snakeye_v3",
     "sw_bomb_mk82_snakeye_v3",
@@ -239,7 +232,6 @@ function ENT:Initialize()
     end
 
     self:SetModel("models/stuffs/boeingb52g/boeing_b52g_stratofortress.mdl")
-    -- Scale the visual model to 1.8x. Physics hull is unchanged.
     self:SetModelScale(MODEL_SCALE)
     self:PhysicsInit(SOLID_VPHYSICS)
     self:SetMoveType(MOVETYPE_VPHYSICS)
@@ -295,12 +287,10 @@ function ENT:Initialize()
         self.EngineLoop:Play()
     end
 
-    -- Weapon state
     self.CurrentWeapon   = nil
     self.IsPeaceful      = false
     self.PeacefulUntil   = 0
 
-    -- Per-weapon shot counters (reset each PickNewWeapon call)
     self.WPN_ShotsFired  = 0
     self.WPN_NextShot    = 0
     self.WPN_MuzzleIndex = 1
@@ -414,21 +404,6 @@ function ENT:GetTargetOrbitCenter(ct)
     return self.DynamicCenterPos, target
 end
 
-function ENT:GetPredictedTargetPos(dropPos, fallbackPos)
-    local target = self:GetPrimaryTarget()
-    if not IsValid(target) then return fallbackPos end
-
-    local targetPos = target:GetPos()
-    local targetVel = target.GetVelocity and target:GetVelocity() or Vector(0, 0, 0)
-    targetVel.z = 0
-
-    local H = math.max(dropPos.z - targetPos.z, 100)
-    local fallTime = math.sqrt(2 * H / GRAVITY_EST)
-    local predicted = targetPos + targetVel * fallTime
-    predicted.z = targetPos.z
-    return predicted
-end
-
 -- ============================================================
 -- THINK / PHYSICS UPDATE
 -- ============================================================
@@ -486,7 +461,6 @@ function ENT:PhysicsUpdate(phys)
     local pos = self:GetPos()
     local dt  = engine.TickInterval()
 
-    -- Altitude drift
     if CurTime() >= self.AltDriftNextPick then
         self.AltDriftTarget   = self.sky - math.Rand(0, self.AltDriftRange)
         self.AltDriftNextPick = CurTime() + math.Rand(12, 30)
@@ -498,7 +472,6 @@ function ENT:PhysicsUpdate(phys)
         self.sky - self.AltDriftRange, self.sky
     )
 
-    -- Orbit steering biased around the moving target instead of a static center.
     local dynamicCenter = self:GetTargetOrbitCenter(CurTime())
     local flatPos    = Vector(pos.x, pos.y, 0)
     local flatCenter = Vector(dynamicCenter.x, dynamicCenter.y, 0)
@@ -612,12 +585,52 @@ function ENT:GetPrimaryTarget()
     return closest
 end
 
+-- GetDirectTarget: returns the raw player position (+ optional scatter offset).
+-- Used by dart-throw windows so the bomb is aimed AT the player, not at the ground.
+function ENT:GetDirectTarget(scatter)
+    scatter = scatter or 0
+    local target = self:GetPrimaryTarget()
+    local base
+    if IsValid(target) then
+        base = target:GetPos()
+        -- Lead the target slightly based on its velocity and distance
+        local tvel = target.GetVelocity and target:GetVelocity() or Vector(0,0,0)
+        local dist = self:GetPos():Distance(base)
+        local travelTime = dist / DART_SPEED
+        base = base + tvel * travelTime
+        base.z = target:GetPos().z  -- keep z at ground level, not predicted z
+    else
+        -- No player: aim at the ground below the plane
+        local tr = util.QuickTrace(
+            Vector(self.CenterPos.x, self.CenterPos.y, self.sky),
+            Vector(0,0,-30000), self)
+        base = tr.HitPos
+    end
+    if scatter > 0 then
+        base = base + Vector(
+            math.Rand(-scatter, scatter),
+            math.Rand(-scatter, scatter),
+            0
+        )
+    end
+    return base
+end
+
+-- GetAimedGroundPos: used only by W3 carpet (ballistic drop).
 function ENT:GetAimedGroundPos(scatter)
     scatter = scatter or 0
     local target = self:GetPrimaryTarget()
     local base
     if IsValid(target) then
-        base = self:GetPredictedTargetPos(self:LocalToWorld(CFG_BombBayLocal), target:GetPos())
+        -- Simple ballistic lead using drop height
+        local dropPos = self:LocalToWorld(CFG_BombBayLocal)
+        local targetPos = target:GetPos()
+        local targetVel = target.GetVelocity and target:GetVelocity() or Vector(0,0,0)
+        targetVel.z = 0
+        local H = math.max(dropPos.z - targetPos.z, 100)
+        local fallTime = math.sqrt(2 * H / GRAVITY_EST)
+        base = targetPos + targetVel * fallTime
+        base.z = targetPos.z
     else
         local tr = util.QuickTrace(
             Vector(self.CenterPos.x, self.CenterPos.y, self.sky),
@@ -635,59 +648,28 @@ function ENT:GetAimedGroundPos(scatter)
 end
 
 -- ============================================================
--- WEAPON SYSTEM — MASTER SCHEDULER
+-- DART VELOCITY SOLVER
+-- Fires a normalized vector from dropPos to targetPos at DART_SPEED.
+-- No gravity math. No horizontal clamping. Pure direction * speed.
 -- ============================================================
-function ENT:HandleWeaponSystem(ct)
-    if self.IsPeaceful then
-        if ct >= self.PeacefulUntil then
-            self.IsPeaceful = false
-            self:PickNewWeapon(ct)
-        end
-        return
+local function CalcDartVelocity(dropPos, targetPos)
+    local dir = targetPos - dropPos
+    if dir:LengthSqr() < 1 then
+        -- degenerate: fire straight down
+        return Vector(0, 0, -DART_SPEED)
     end
-
-    local done = false
-    local w = self.CurrentWeapon
-    if     w == "precision" then done = self:UpdatePrecision(ct)
-    elseif w == "heavy"     then done = self:UpdateHeavy(ct)
-    elseif w == "medium"    then done = self:UpdateMedium(ct)
-    elseif w == "light"     then done = self:UpdateLight(ct)
-    elseif w == "hellfire"  then done = self:UpdateHellfire(ct)
-    elseif w == "retarded"  then done = self:UpdateRetarded(ct)
-    else   done = true end
-
-    if done then
-        self.IsPeaceful    = true
-        self.CurrentWeapon = nil
-        self.PeacefulUntil = ct + math.Rand(CFG_PeacefulMin, CFG_PeacefulMax)
-        self:Debug("Peaceful until " .. string.format("%.1f", self.PeacefulUntil))
-    end
-end
-
-function ENT:PickNewWeapon(ct)
-    local roll = math.random(1, 6)
-    if     roll == 1 then self.CurrentWeapon = "precision"
-    elseif roll == 2 then self.CurrentWeapon = "heavy"
-    elseif roll == 3 then self.CurrentWeapon = "medium"
-    elseif roll == 4 then self.CurrentWeapon = "light"
-    elseif roll == 5 then self.CurrentWeapon = "hellfire"
-    else                   self.CurrentWeapon = "retarded"
-    end
-
-    self.WPN_ShotsFired  = 0
-    self.WPN_NextShot    = ct + 0.5
-    self.WPN_MuzzleIndex = 1
-
-    self:Debug("Selected weapon window: " .. self.CurrentWeapon)
+    dir:Normalize()
+    return dir * DART_SPEED
 end
 
 -- ============================================================
--- SHARED BOMB SPAWN HELPERS
+-- CARPET BALLISTIC SOLVER (W3 only)
+-- Keeps the original forward-throw logic for spread carpet bombing.
 -- ============================================================
+local CARPET_SPEED_MIN = 150
+local CARPET_SPEED_MAX = 3200
 
--- CalcBallisticImpulse: compute the initial velocity vector for a dumb bomb
--- released from dropPos so it reaches aimPos under gravity.
-local function CalcBallisticImpulse(dropPos, aimPos, aircraftFwdVel)
+local function CalcCarpetImpulse(dropPos, aimPos, aircraftFwdVel)
     local H        = math.max(dropPos.z - aimPos.z, 100)
     local fallTime = math.sqrt(2 * H / GRAVITY_EST)
 
@@ -695,10 +677,7 @@ local function CalcBallisticImpulse(dropPos, aimPos, aircraftFwdVel)
     local dy = aimPos.y - dropPos.y
     local lateralDist = math.sqrt(dx*dx + dy*dy)
 
-    local reqSpeed = math.Clamp(
-        lateralDist / fallTime,
-        BALLISTIC_MIN_H, BALLISTIC_MAX_H
-    )
+    local reqSpeed = math.Clamp(lateralDist / fallTime, CARPET_SPEED_MIN, CARPET_SPEED_MAX)
 
     local dir
     if lateralDist > 1 then
@@ -715,25 +694,24 @@ local function CalcBallisticImpulse(dropPos, aimPos, aircraftFwdVel)
     return vel
 end
 
--- SpawnSWBomb: spawn a SW bomb entity and apply initial velocity.
---
--- isRetarded: activates body-group 1 slot 1 (chute/blades) AND
---             applies a strong horizontal throw (CFG_W6_FwdMult x aircraft
---             forward speed) instead of ballistic impulse. The deployed
---             chute then kills most of the forward momentum and the bomb
---             drops near-vertically onto the target.
-function ENT:SpawnSWBomb(entClass, dropPos, aimPos, isRetarded)
+-- ============================================================
+-- SPAWN HELPERS
+-- ============================================================
+
+-- SpawnDartBomb: dart-throw. The bomb is aimed directly at targetPos.
+function ENT:SpawnDartBomb(entClass, dropPos, targetPos, isRetarded)
     local bomb = ents.Create(entClass)
     if not IsValid(bomb) then
         self:Debug("WARN: failed to create '" .. tostring(entClass) .. "'")
         return nil
     end
 
-    bomb.IsOnPlane  = true
-    bomb.Launcher   = self
+    bomb.IsOnPlane = true
+    bomb.Launcher  = self
     bomb:SetOwner(self)
 
-    local toTarget = aimPos - dropPos
+    -- Orient the bomb toward the target
+    local toTarget = targetPos - dropPos
     local dropAng
     if toTarget:LengthSqr() > 1 then
         toTarget:Normalize()
@@ -747,35 +725,52 @@ function ENT:SpawnSWBomb(entClass, dropPos, aimPos, isRetarded)
     bomb:Spawn()
     bomb:Activate()
 
-    if isRetarded then
-        bomb:SetBodygroup(1, 1)
+    if isRetarded then bomb:SetBodygroup(1, 1) end
+
+    if bomb.Arm then bomb:Arm()
+    elseif bomb.Armed ~= nil then bomb.Armed = true end
+
+    local bPhys = bomb:GetPhysicsObject()
+    if IsValid(bPhys) then
+        bPhys:SetVelocity(CalcDartVelocity(dropPos, targetPos))
     end
 
-    if bomb.Arm then
-        bomb:Arm()
-    elseif bomb.Armed ~= nil then
-        bomb.Armed = true
+    constraint.NoCollide(bomb, self, 0, 0)
+    local ref = bomb
+    timer.Simple(0.6, function()
+        if IsValid(ref) and IsValid(self) then
+            constraint.RemoveConstraints(ref, "NoCollide")
+        end
+    end)
+
+    return bomb
+end
+
+-- SpawnCarpetBomb: ballistic drop for W3 carpet runs.
+function ENT:SpawnCarpetBomb(entClass, dropPos, aimPos)
+    local bomb = ents.Create(entClass)
+    if not IsValid(bomb) then
+        self:Debug("WARN: failed to create '" .. tostring(entClass) .. "'")
+        return nil
     end
+
+    bomb.IsOnPlane = true
+    bomb.Launcher  = self
+    bomb:SetOwner(self)
+
+    bomb:SetPos(dropPos)
+    bomb:SetAngles(Angle(90, 0, 0))
+    bomb:Spawn()
+    bomb:Activate()
+
+    if bomb.Arm then bomb:Arm()
+    elseif bomb.Armed ~= nil then bomb.Armed = true end
 
     local bPhys = bomb:GetPhysicsObject()
     if IsValid(bPhys) then
         local aircraftFwd = Angle(0, self.flightYaw, 0):Forward() * self.Speed
         aircraftFwd.z = 0
-
-        if isRetarded then
-            -- Strong forward throw: CFG_W6_FwdMult x cruise speed.
-            -- The chute arrests horizontal momentum after opening; the
-            -- multiplier ensures the bomb travels far enough forward to
-            -- land on (or past) the target rather than behind the aircraft.
-            bPhys:SetVelocity(Vector(
-                aircraftFwd.x * CFG_W6_FwdMult,
-                aircraftFwd.y * CFG_W6_FwdMult,
-                -80
-            ))
-        else
-            local vel = CalcBallisticImpulse(dropPos, aimPos, aircraftFwd)
-            bPhys:SetVelocity(vel)
-        end
+        bPhys:SetVelocity(CalcCarpetImpulse(dropPos, aimPos, aircraftFwd))
     end
 
     constraint.NoCollide(bomb, self, 0, 0)
@@ -790,7 +785,7 @@ function ENT:SpawnSWBomb(entClass, dropPos, aimPos, isRetarded)
 end
 
 -- ============================================================
--- W1: PRECISION GUIDED WEAPONS
+-- W1: PRECISION GUIDED WEAPONS — dart throw, zero scatter
 -- ============================================================
 function ENT:UpdatePrecision(ct)
     if self.WPN_ShotsFired >= CFG_W1_Count then return true end
@@ -799,17 +794,17 @@ function ENT:UpdatePrecision(ct)
     self.WPN_NextShot   = ct + CFG_W1_Delay
     self.WPN_ShotsFired = self.WPN_ShotsFired + 1
 
-    local entClass = CFG_W1_Pool[math.random(#CFG_W1_Pool)]
-    local dropPos  = self:LocalToWorld(CFG_BombBayLocal)
-    local aimPos   = self:GetAimedGroundPos(CFG_W1_Scatter)
+    local entClass  = CFG_W1_Pool[math.random(#CFG_W1_Pool)]
+    local dropPos   = self:LocalToWorld(CFG_BombBayLocal)
+    local targetPos = self:GetDirectTarget(CFG_W1_Scatter)
 
-    self:SpawnSWBomb(entClass, dropPos, aimPos, false)
+    self:SpawnDartBomb(entClass, dropPos, targetPos, false)
     self:Debug("W1 PRECISION " .. self.WPN_ShotsFired .. "/" .. CFG_W1_Count .. " " .. entClass)
     return (self.WPN_ShotsFired >= CFG_W1_Count)
 end
 
 -- ============================================================
--- W2: HEAVY ORDNANCE
+-- W2: HEAVY ORDNANCE — dart throw, zero scatter
 -- ============================================================
 function ENT:UpdateHeavy(ct)
     if self.WPN_ShotsFired >= CFG_W2_Count then return true end
@@ -818,19 +813,19 @@ function ENT:UpdateHeavy(ct)
     self.WPN_NextShot   = ct + CFG_W2_Delay
     self.WPN_ShotsFired = self.WPN_ShotsFired + 1
 
-    local entClass = CFG_W2_Pool[math.random(#CFG_W2_Pool)]
-    local dropPos  = self:LocalToWorld(CFG_BombBayLocal)
-    local aimPos   = self:GetAimedGroundPos(CFG_W2_Scatter)
+    local entClass  = CFG_W2_Pool[math.random(#CFG_W2_Pool)]
+    local dropPos   = self:LocalToWorld(CFG_BombBayLocal)
+    local targetPos = self:GetDirectTarget(CFG_W2_Scatter)
 
+    -- _air variants still get the chute bodygroup but are dart-aimed
     local isRetarded = string.find(entClass, "_air_v3", 1, true) ~= nil
-
-    self:SpawnSWBomb(entClass, dropPos, aimPos, isRetarded)
+    self:SpawnDartBomb(entClass, dropPos, targetPos, isRetarded)
     self:Debug("W2 HEAVY " .. self.WPN_ShotsFired .. "/" .. CFG_W2_Count .. " " .. entClass)
     return (self.WPN_ShotsFired >= CFG_W2_Count)
 end
 
 -- ============================================================
--- W3: MEDIUM CARPET
+-- W3: MEDIUM CARPET — ballistic drop, spread scatter
 -- ============================================================
 function ENT:UpdateMedium(ct)
     if self.WPN_ShotsFired >= CFG_W3_Count then return true end
@@ -843,13 +838,13 @@ function ENT:UpdateMedium(ct)
     local dropPos  = self:LocalToWorld(CFG_BombBayLocal)
     local aimPos   = self:GetAimedGroundPos(CFG_W3_Scatter)
 
-    self:SpawnSWBomb(entClass, dropPos, aimPos, false)
+    self:SpawnCarpetBomb(entClass, dropPos, aimPos)
     self:Debug("W3 MEDIUM " .. self.WPN_ShotsFired .. "/" .. CFG_W3_Count .. " " .. entClass)
     return (self.WPN_ShotsFired >= CFG_W3_Count)
 end
 
 -- ============================================================
--- W4: LIGHT SCATTERED
+-- W4: LIGHT SCATTERED — dart throw, small scatter
 -- ============================================================
 function ENT:UpdateLight(ct)
     if self.WPN_ShotsFired >= CFG_W4_Count then return true end
@@ -858,17 +853,17 @@ function ENT:UpdateLight(ct)
     self.WPN_NextShot   = ct + CFG_W4_Delay
     self.WPN_ShotsFired = self.WPN_ShotsFired + 1
 
-    local entClass = CFG_W4_Pool[math.random(#CFG_W4_Pool)]
-    local dropPos  = self:LocalToWorld(CFG_BombBayLocal)
-    local aimPos   = self:GetAimedGroundPos(CFG_W4_Scatter)
+    local entClass  = CFG_W4_Pool[math.random(#CFG_W4_Pool)]
+    local dropPos   = self:LocalToWorld(CFG_BombBayLocal)
+    local targetPos = self:GetDirectTarget(CFG_W4_Scatter)
 
-    self:SpawnSWBomb(entClass, dropPos, aimPos, false)
+    self:SpawnDartBomb(entClass, dropPos, targetPos, false)
     self:Debug("W4 LIGHT " .. self.WPN_ShotsFired .. "/" .. CFG_W4_Count .. " " .. entClass)
     return (self.WPN_ShotsFired >= CFG_W4_Count)
 end
 
 -- ============================================================
--- W5: SW HELLFIRE MISSILE
+-- W5: SW HELLFIRE MISSILE — unchanged
 -- ============================================================
 function ENT:UpdateHellfire(ct)
     if self.WPN_ShotsFired >= CFG_W5_Count then return true end
@@ -881,7 +876,7 @@ function ENT:UpdateHellfire(ct)
     self.WPN_MuzzleIndex = (self.WPN_MuzzleIndex % #CFG_W5_Muzzles) + 1
     local muzzlePos = self:LocalToWorld(muzzleLocal)
 
-    local aimPos = self:GetAimedGroundPos(CFG_W5_Scatter)
+    local aimPos = self:GetDirectTarget(CFG_W5_Scatter)
     local aimDir = aimPos - muzzlePos
     if aimDir:LengthSqr() < 1 then
         self:Debug("W5 HELLFIRE: degenerate aim vector, skip")
@@ -919,19 +914,25 @@ function ENT:UpdateHellfire(ct)
 
     timer.Simple(0.15, function()
         if not IsValid(mRef) then return end
-        local tr = util.TraceHull({
-            start  = muzzlePos,
-            endpos = muzzlePos + aimDir * 500000,
-            mins   = Vector(-20,-20,-20),
-            maxs   = Vector(20,20,20),
-            filter = { self, mRef }
-        })
-        if tr.Hit and IsValid(tr.Entity) then
-            mRef.target       = tr.Entity
-            mRef.targetOffset = tr.Entity:WorldToLocal(tr.HitPos)
+        local target = self:GetPrimaryTarget()
+        if IsValid(target) then
+            mRef.target       = target
+            mRef.targetOffset = target:WorldToLocal(target:GetPos())
         else
-            mRef.target       = game.GetWorld()
-            mRef.targetOffset = game.GetWorld():WorldToLocal(aimPos)
+            local tr = util.TraceHull({
+                start  = muzzlePos,
+                endpos = muzzlePos + aimDir * 500000,
+                mins   = Vector(-20,-20,-20),
+                maxs   = Vector(20,20,20),
+                filter = { self, mRef }
+            })
+            if tr.Hit and IsValid(tr.Entity) then
+                mRef.target       = tr.Entity
+                mRef.targetOffset = tr.Entity:WorldToLocal(tr.HitPos)
+            else
+                mRef.target       = game.GetWorld()
+                mRef.targetOffset = game.GetWorld():WorldToLocal(aimPos)
+            end
         end
         mRef.GuidanceActive = true
         mRef.HaveGuidance   = true
@@ -952,7 +953,7 @@ function ENT:UpdateHellfire(ct)
 end
 
 -- ============================================================
--- W6: RETARDED / PARACHUTE BOMBS
+-- W6: RETARDED / PARACHUTE BOMBS — dart aimed, chute deployed
 -- ============================================================
 function ENT:UpdateRetarded(ct)
     if self.WPN_ShotsFired >= CFG_W6_Count then return true end
@@ -961,11 +962,13 @@ function ENT:UpdateRetarded(ct)
     self.WPN_NextShot   = ct + CFG_W6_Delay
     self.WPN_ShotsFired = self.WPN_ShotsFired + 1
 
-    local entClass = CFG_W6_Pool[math.random(#CFG_W6_Pool)]
-    local dropPos  = self:LocalToWorld(CFG_BombBayLocal)
-    local aimPos   = self:GetAimedGroundPos(CFG_W6_Scatter)
+    local entClass  = CFG_W6_Pool[math.random(#CFG_W6_Pool)]
+    local dropPos   = self:LocalToWorld(CFG_BombBayLocal)
+    local targetPos = self:GetDirectTarget(CFG_W6_Scatter)
 
-    self:SpawnSWBomb(entClass, dropPos, aimPos, true)
+    -- isRetarded=true activates the chute bodygroup; dart velocity carries it to target,
+    -- then the chute bleeds speed naturally after deployment.
+    self:SpawnDartBomb(entClass, dropPos, targetPos, true)
     self:Debug("W6 RETARDED " .. self.WPN_ShotsFired .. "/" .. CFG_W6_Count .. " " .. entClass)
     return (self.WPN_ShotsFired >= CFG_W6_Count)
 end
