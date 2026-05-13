@@ -3,14 +3,6 @@ AddCSLuaFile("cl_trailsystem.lua")
 AddCSLuaFile("shared.lua")
 include("shared.lua")
 
--- ============================================================
--- MODEL / FLIGHT ORIENTATION NOTES
--- The B-52 model nose points along LOCAL +X.
--- MODEL_YAW_OFFSET = -90 aligns the visual nose with flightYaw.
--- bank  (wing tilt)   = GMod Angle.p   (negative sign: right turn -> right wing down)
--- pitch (nose up/dn)  = GMod Angle.r
--- Final angle: Angle( -SmoothedRoll, flightYaw+OFFSET, -SmoothedPitch )
--- ============================================================
 local MODEL_YAW_OFFSET = -90
 
 local ROLL_SUSTAINED_GAIN = 2.2
@@ -25,9 +17,6 @@ local MODEL_SCALE = 1.8
 
 local TUMBLE_GRAVITY = 600
 
--- ============================================================
--- SW MUNITIONS CATALOGUE
--- ============================================================
 local CFG_MaxHP        = 450
 local CFG_FadeDuration = 3.0
 local CFG_PeacefulMin  = 6
@@ -62,6 +51,15 @@ local CFG_W2_Pool    = {
     "sw_bomb_anm66_v3","sw_bomb_mk84_v3", "sw_bomb_mk84_air_v3","sw_bomb_anmk1_v3",
 }
 
+-- Crash bombs: 2 heavy bombs spawned at impact point, 0.7s apart.
+-- Picked from CFG_W2_Pool (non-air/retarded entries only).
+local CFG_CRASH_BOMB_COUNT = 2
+local CFG_CRASH_BOMB_GAP   = 0.7
+local CFG_CRASH_BOMB_POOL  = {
+    "sw_bomb_gbu43_v3","sw_bomb_gbu57_v3","sw_bomb_m118_v3",
+    "sw_bomb_anm56_v3","sw_bomb_anm66_v3","sw_bomb_mk84_v3","sw_bomb_anmk1_v3",
+}
+
 local CFG_W3_Count   = 8
 local CFG_W3_Delay   = 0.4
 local CFG_W3_Scatter = 1200
@@ -94,9 +92,6 @@ local CFG_W6_Pool    = {
     "sw_bomb_mk82_air_v3",    "sw_bomb_mk84_air_v3",
 }
 
--- ============================================================
--- NETWORK STRING
--- ============================================================
 util.AddNetworkString("bombin_b52_damage_tier")
 
 local function CalcTier(hp, maxHP)
@@ -110,9 +105,6 @@ local function BroadcastTier(ent, tier)
     net.Broadcast()
 end
 
--- ============================================================
--- INITIALIZE
--- ============================================================
 function ENT:Initialize()
     self.CenterPos    = self:GetVar("CenterPos",    self:GetPos())
     self.CallDir      = self:GetVar("CallDir",      Vector(1,0,0))
@@ -220,9 +212,6 @@ function ENT:Initialize()
     self:Debug("B-52 (SW-munitions, scale=" .. MODEL_SCALE .. ") spawned. sky=" .. self.sky)
 end
 
--- ============================================================
--- DAMAGE
--- ============================================================
 function ENT:OnTakeDamage(dmginfo)
     if self.IsDestroyed then return end
     if dmginfo:IsDamageType(DMG_CRUSH) then return end
@@ -237,7 +226,7 @@ function ENT:OnTakeDamage(dmginfo)
 end
 
 -- ============================================================
--- TUMBLE / CRASH  (identical pattern to C17 fix)
+-- TUMBLE / CRASH
 -- ============================================================
 function ENT:StartTumble()
     self.IsTumbling     = true
@@ -258,8 +247,6 @@ function ENT:StartTumble()
         math.Rand(150,400)*sign()
     )
 
-    -- Stop the physics engine from competing with manual SetPos/SetAngles.
-    -- SetAngleVelocity is the correct GMod PhysObj method (NOT SetAngularVelocity).
     self:SetMoveType(MOVETYPE_NONE)
     local phys = self:GetPhysicsObject()
     if IsValid(phys) then
@@ -295,7 +282,6 @@ function ENT:UpdateTumble(ct)
         self.ang.r + av.z * dt
     )
 
-    -- Check ground/wall BEFORE moving so CrashExplode fires at a valid position.
     local hitGround = newPos.z <= (self.TumbleGroundZ or -16384) + 200
     local hitWall   = false
     if not hitGround then
@@ -312,17 +298,44 @@ function ENT:UpdateTumble(ct)
     self:SetAngles(self.ang)
 end
 
+-- Spawns a single crash bomb at pos, nose-down so it detonates on impact.
+local function SpawnCrashBomb(crashPos)
+    local entClass = CFG_CRASH_BOMB_POOL[math.random(#CFG_CRASH_BOMB_POOL)]
+    local bomb = ents.Create(entClass)
+    if not IsValid(bomb) then return end
+    bomb:SetPos(crashPos + Vector(0, 0, 60))
+    bomb:SetAngles(Angle(90, 0, 0))
+    bomb:Spawn()
+    bomb:Activate()
+    local bPhys = bomb:GetPhysicsObject()
+    if IsValid(bPhys) then
+        bPhys:SetVelocity(Vector(0, 0, -120))
+    end
+    if bomb.Arm then bomb:Arm()
+    elseif bomb.Armed ~= nil then bomb.Armed = true end
+end
+
 function ENT:CrashExplode()
     if self.TumbleCrashed then return end
     self.TumbleCrashed = true
 
-    local pos = self:GetPos()
+    local pos = Vector(self:GetPos())
+
     local e1=EffectData() e1:SetOrigin(pos) e1:SetScale(6) e1:SetMagnitude(6) e1:SetRadius(600) util.Effect("HelicopterMegaBomb",e1,true,true)
     local e2=EffectData() e2:SetOrigin(pos) e2:SetScale(5) e2:SetMagnitude(5) e2:SetRadius(500) util.Effect("500lb_air",e2,true,true)
     local e3=EffectData() e3:SetOrigin(pos+Vector(0,0,80)) e3:SetScale(4) e3:SetMagnitude(4) e3:SetRadius(400) util.Effect("500lb_air",e3,true,true)
     sound.Play("ambient/explosions/explode_8.wav", pos, 140, 90, 1.0)
     sound.Play("weapon_AWP.Single", pos, 145, 60, 1.0)
     util.BlastDamage(game.GetWorld(), game.GetWorld(), pos, 400, 200)
+
+    -- Spawn 2 heavy bombs at the crash site, 0.7s apart, to simulate
+    -- the final fuel/munitions cook-off explosion.
+    for i = 0, CFG_CRASH_BOMB_COUNT - 1 do
+        local delay = i * CFG_CRASH_BOMB_GAP
+        timer.Simple(delay, function()
+            SpawnCrashBomb(pos)
+        end)
+    end
 
     local ref = self
     timer.Simple(0, function()
@@ -340,8 +353,6 @@ function ENT:DestroyUAV()
         end)
     end
     self:StartTumble()
-    -- Safety net: if plane never hits ground, force crash after 20s.
-    -- TumbleCrashed gate prevents double-fire.
     timer.Simple(20, function()
         if IsValid(self) then self:CrashExplode() end
     end)
@@ -386,8 +397,6 @@ function ENT:Think()
 end
 
 function ENT:PhysicsUpdate(phys)
-    -- During tumble, movement is driven entirely by UpdateTumble in Think.
-    -- PhysicsUpdate must not touch position or angles during tumble.
     if self.IsTumbling or self.IsDestroyed then return end
 
     if not self.DieTime or not self.sky then return end
@@ -528,7 +537,7 @@ function ENT:GetAimedGroundPos(scatter)
 end
 
 -- ============================================================
--- WEAPON SYSTEM — MASTER SCHEDULER
+-- WEAPON SYSTEM
 -- ============================================================
 function ENT:HandleWeaponSystem(ct)
     if self.IsPeaceful then
@@ -800,7 +809,7 @@ function ENT:UpdateHellfire(ct)
 
     local missile = ents.Create(CFG_W5_Entity)
     if not IsValid(missile) then
-        self:Debug("W5 HELLFIRE: entity '" .. CFG_W5_Entity .. "' not found — is SW installed?")
+        self:Debug("W5 HELLFIRE: entity '" .. CFG_W5_Entity .. "' not found - is SW installed?")
         return true
     end
 
