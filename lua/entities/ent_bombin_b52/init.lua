@@ -51,8 +51,8 @@ local CFG_W2_Pool    = {
     "sw_bomb_anm66_v3","sw_bomb_mk84_v3", "sw_bomb_mk84_air_v3","sw_bomb_anmk1_v3",
 }
 
--- Crash bombs: 2 heavy bombs spawned at impact point, 0.7s apart.
--- Picked from CFG_W2_Pool (non-air/retarded entries only).
+-- Crash bombs: 2 heavy bombs at impact point, 0.7s apart.
+-- Non-retarded entries only (no _air_v3).
 local CFG_CRASH_BOMB_COUNT = 2
 local CFG_CRASH_BOMB_GAP   = 0.7
 local CFG_CRASH_BOMB_POOL  = {
@@ -226,7 +226,7 @@ function ENT:OnTakeDamage(dmginfo)
 end
 
 -- ============================================================
--- TUMBLE / CRASH
+-- TUMBLE / CRASH  (C-17 standard)
 -- ============================================================
 function ENT:StartTumble()
     self.IsTumbling     = true
@@ -238,13 +238,15 @@ function ENT:StartTumble()
 
     local fwd = Angle(0, self.flightYaw, 0):Forward()
     local spd = self.Speed or 260
-    self.TumbleVelocity = Vector(fwd.x*spd, fwd.y*spd, -200)
+    -- Initial Z velocity matches C-17 standard (-80 = heavy glide, not instant plummet)
+    self.TumbleVelocity = Vector(fwd.x*spd, fwd.y*spd, -80)
 
     local function sign() return (math.random(2)==1) and 1 or -1 end
+    -- Angular velocity matches C-17 standard: slow, weighted, realistic
     self.TumbleAngVelocity = Vector(
-        math.Rand(80,200)*sign(),
-        math.Rand(20,80)*sign(),
-        math.Rand(150,400)*sign()
+        math.Rand(8, 18) * sign(),
+        math.Rand(3,  8) * sign(),
+        math.Rand(20, 40) * sign()
     )
 
     self:SetMoveType(MOVETYPE_NONE)
@@ -298,21 +300,30 @@ function ENT:UpdateTumble(ct)
     self:SetAngles(self.ang)
 end
 
--- Spawns a single crash bomb at pos, nose-down so it detonates on impact.
+-- Spawns a single crash bomb at the impact site.
+-- Order: Spawn -> Activate -> velocity -> arm  (matches C-17 SpawnDartBomb pattern).
 local function SpawnCrashBomb(crashPos)
     local entClass = CFG_CRASH_BOMB_POOL[math.random(#CFG_CRASH_BOMB_POOL)]
     local bomb = ents.Create(entClass)
     if not IsValid(bomb) then return end
+
     bomb:SetPos(crashPos + Vector(0, 0, 60))
-    bomb:SetAngles(Angle(90, 0, 0))
+    bomb:SetAngles(Angle(90, 0, 0))   -- nose-down
     bomb:Spawn()
     bomb:Activate()
+
+    -- Tiny downward nudge so it reaches the ground immediately.
     local bPhys = bomb:GetPhysicsObject()
     if IsValid(bPhys) then
         bPhys:SetVelocity(Vector(0, 0, -120))
     end
-    if bomb.Arm then bomb:Arm()
-    elseif bomb.Armed ~= nil then bomb.Armed = true end
+
+    -- Arm after Spawn+Activate, matching weapon-window logic.
+    if bomb.Arm then
+        bomb:Arm()
+    elseif bomb.Armed ~= nil then
+        bomb.Armed = true
+    end
 end
 
 function ENT:CrashExplode()
@@ -328,8 +339,7 @@ function ENT:CrashExplode()
     sound.Play("weapon_AWP.Single", pos, 145, 60, 1.0)
     util.BlastDamage(game.GetWorld(), game.GetWorld(), pos, 400, 200)
 
-    -- Spawn 2 heavy bombs at the crash site, 0.7s apart, to simulate
-    -- the final fuel/munitions cook-off explosion.
+    -- 2 heavy bombs at crash site, 0.7s apart — simulates cook-off.
     for i = 0, CFG_CRASH_BOMB_COUNT - 1 do
         local delay = i * CFG_CRASH_BOMB_GAP
         timer.Simple(delay, function()
@@ -590,7 +600,6 @@ function ENT:ApplyBombSafety(bomb)
     if not IsValid(bomb) then return end
 
     local skyKillZ = self.sky - SKYBOX_KILL_MARGIN
-    local armAt    = CurTime() + BOMB_ARM_DELAY
 
     bomb.Armed = false
     bomb:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
@@ -686,7 +695,9 @@ function ENT:SpawnSWBomb(entClass, dropPos, aimPos, isRetarded)
         bomb:SetBodygroup(1, 1)
     end
 
-    self:ApplyBombSafety(bomb)
+    -- NoCollide against plane for 0.6s so bomb clears the fuselage cleanly
+    local handle = constraint.NoCollide(bomb, self, 0, 0)
+    timer.Simple(0.6, function() if IsValid(handle) then handle:Remove() end end)
 
     local bPhys = bomb:GetPhysicsObject()
     if IsValid(bPhys) then
@@ -704,6 +715,10 @@ function ENT:SpawnSWBomb(entClass, dropPos, aimPos, isRetarded)
             bPhys:SetVelocity(vel)
         end
     end
+
+    -- Arm after Spawn+Activate+velocity, matching C-17 weapon-window pattern
+    if bomb.Arm then bomb:Arm()
+    elseif bomb.Armed ~= nil then bomb.Armed = true end
 
     return bomb
 end
