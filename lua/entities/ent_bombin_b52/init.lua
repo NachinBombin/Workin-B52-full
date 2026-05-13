@@ -23,6 +23,8 @@ local ENGINE_LOOP_SOUND = "sound/b52/b52.wav"
 
 local MODEL_SCALE = 1.8
 
+local TUMBLE_GRAVITY = 600
+
 -- ============================================================
 -- SW MUNITIONS CATALOGUE
 -- ============================================================
@@ -36,20 +38,11 @@ local GRAVITY_EST      = 580
 local BALLISTIC_MIN_H  = 150
 local BALLISTIC_MAX_H  = 3200
 
--- ============================================================
--- SAFETY CONSTANTS
--- ============================================================
--- How long (seconds) after drop before collisions are enabled and
--- the bomb is allowed to arm/explode. Must be >= 1.0.
 local BOMB_ARM_DELAY     = 1.0
--- Margin below self.sky where we silently kill a bomb that is
--- still rising toward the skybox (prevents skybox detonations).
 local SKYBOX_KILL_MARGIN = 200
 
--- ---------- W6 retarded ----------
 local CFG_W6_FwdMult = 3.5
 
--- ---------- W1 ----------
 local CFG_W1_Count   = 4
 local CFG_W1_Delay   = 3.0
 local CFG_W1_Scatter = 300
@@ -61,7 +54,6 @@ local CFG_W1_Pool    = {
     "sw_bomb_gbu15_v3",
 }
 
--- ---------- W2 ----------
 local CFG_W2_Count   = 2
 local CFG_W2_Delay   = 4.0
 local CFG_W2_Scatter = 1800
@@ -70,7 +62,6 @@ local CFG_W2_Pool    = {
     "sw_bomb_anm66_v3","sw_bomb_mk84_v3", "sw_bomb_mk84_air_v3","sw_bomb_anmk1_v3",
 }
 
--- ---------- W3 ----------
 local CFG_W3_Count   = 8
 local CFG_W3_Delay   = 0.4
 local CFG_W3_Scatter = 1200
@@ -81,7 +72,6 @@ local CFG_W3_Pool    = {
     "sw_bomb_m62_v3","sw_bomb_m63_v3",
 }
 
--- ---------- W4 ----------
 local CFG_W4_Count   = 12
 local CFG_W4_Delay   = 0.25
 local CFG_W4_Scatter = 1600
@@ -90,14 +80,12 @@ local CFG_W4_Pool    = {
     "sw_bomb_gbu39_v3","sw_bomb_gbu53_v3",
 }
 
--- ---------- W5 Hellfire ----------
 local CFG_W5_Entity  = "sw_missile_agm114_v3"
 local CFG_W5_Count   = 4
 local CFG_W5_Delay   = 2.5
 local CFG_W5_Scatter = 80
 local CFG_W5_Muzzles = { Vector(60,-70,-8), Vector(60,70,-8) }
 
--- ---------- W6 Retarded ----------
 local CFG_W6_Count   = 6
 local CFG_W6_Delay   = 0.55
 local CFG_W6_Scatter = 600
@@ -198,7 +186,7 @@ function ENT:Initialize()
     self.MaxTurnRate = 28
 
     self.IsTumbling        = false
-    self.TumbleStartTime   = 0
+    self.TumbleLastTime    = 0
     self.TumbleGroundZ     = ground
     self.TumbleCrashed     = false
     self.TumbleVelocity    = Vector(0, 0, 0)
@@ -248,37 +236,98 @@ function ENT:OnTakeDamage(dmginfo)
     if hp <= 0 then self:DestroyUAV() end
 end
 
+-- ============================================================
+-- TUMBLE / CRASH  (identical pattern to C17 fix)
+-- ============================================================
 function ENT:StartTumble()
-    self.IsTumbling      = true
-    self.TumbleStartTime = CurTime()
-    self.TumbleCrashed   = false
+    self.IsTumbling     = true
+    self.TumbleLastTime = CurTime()
+    self.TumbleCrashed  = false
+
     local gnd = self:FindGround(self:GetPos())
     if gnd ~= -1 then self.TumbleGroundZ = gnd end
+
     local fwd = Angle(0, self.flightYaw, 0):Forward()
-    self.TumbleVelocity    = Vector(fwd.x*(self.Speed or 260), fwd.y*(self.Speed or 260), -200)
+    local spd = self.Speed or 260
+    self.TumbleVelocity = Vector(fwd.x*spd, fwd.y*spd, -200)
+
     local function sign() return (math.random(2)==1) and 1 or -1 end
     self.TumbleAngVelocity = Vector(
         math.Rand(80,200)*sign(),
         math.Rand(20,80)*sign(),
         math.Rand(150,400)*sign()
     )
+
+    -- Stop the physics engine from competing with manual SetPos/SetAngles.
+    -- SetAngleVelocity is the correct GMod PhysObj method (NOT SetAngularVelocity).
+    self:SetMoveType(MOVETYPE_NONE)
+    local phys = self:GetPhysicsObject()
+    if IsValid(phys) then
+        phys:EnableGravity(false)
+        phys:SetVelocity(Vector(0,0,0))
+        phys:SetAngleVelocity(Vector(0,0,0))
+        phys:Sleep()
+    end
+
     local pos = self:GetPos()
-    local ed  = EffectData() ed:SetOrigin(pos) ed:SetScale(4) ed:SetMagnitude(4) ed:SetRadius(400)
+    local ed  = EffectData()
+    ed:SetOrigin(pos) ed:SetScale(4) ed:SetMagnitude(4) ed:SetRadius(400)
     util.Effect("500lb_air", ed, true, true)
     sound.Play("ambient/explosions/explode_4.wav", pos, 135, 95, 1.0)
+end
+
+function ENT:UpdateTumble(ct)
+    if not self.IsTumbling or self.TumbleCrashed then return end
+
+    local dt = ct - self.TumbleLastTime
+    self.TumbleLastTime = ct
+    if dt <= 0 or dt > 0.2 then return end
+
+    self.TumbleVelocity.z = self.TumbleVelocity.z - TUMBLE_GRAVITY * dt
+
+    local pos    = self:GetPos()
+    local newPos = pos + self.TumbleVelocity * dt
+
+    local av = self.TumbleAngVelocity
+    self.ang = Angle(
+        self.ang.p + av.x * dt,
+        self.ang.y + av.y * dt,
+        self.ang.r + av.z * dt
+    )
+
+    -- Check ground/wall BEFORE moving so CrashExplode fires at a valid position.
+    local hitGround = newPos.z <= (self.TumbleGroundZ or -16384) + 200
+    local hitWall   = false
+    if not hitGround then
+        local tr = util.TraceLine({start=pos, endpos=newPos, filter=self, mask=MASK_SOLID_BRUSHONLY})
+        hitWall = tr.HitWorld
+    end
+
+    if hitGround or hitWall then
+        self:CrashExplode()
+        return
+    end
+
+    self:SetPos(newPos)
+    self:SetAngles(self.ang)
 end
 
 function ENT:CrashExplode()
     if self.TumbleCrashed then return end
     self.TumbleCrashed = true
+
     local pos = self:GetPos()
     local e1=EffectData() e1:SetOrigin(pos) e1:SetScale(6) e1:SetMagnitude(6) e1:SetRadius(600) util.Effect("HelicopterMegaBomb",e1,true,true)
     local e2=EffectData() e2:SetOrigin(pos) e2:SetScale(5) e2:SetMagnitude(5) e2:SetRadius(500) util.Effect("500lb_air",e2,true,true)
     local e3=EffectData() e3:SetOrigin(pos+Vector(0,0,80)) e3:SetScale(4) e3:SetMagnitude(4) e3:SetRadius(400) util.Effect("500lb_air",e3,true,true)
     sound.Play("ambient/explosions/explode_8.wav", pos, 140, 90, 1.0)
     sound.Play("weapon_AWP.Single", pos, 145, 60, 1.0)
-    util.BlastDamage(self, self, pos, 400, 200)
-    self:Remove()
+    util.BlastDamage(game.GetWorld(), game.GetWorld(), pos, 400, 200)
+
+    local ref = self
+    timer.Simple(0, function()
+        if IsValid(ref) then ref:Remove() end
+    end)
 end
 
 function ENT:DestroyUAV()
@@ -291,7 +340,9 @@ function ENT:DestroyUAV()
         end)
     end
     self:StartTumble()
-    timer.Simple(12, function()
+    -- Safety net: if plane never hits ground, force crash after 20s.
+    -- TumbleCrashed gate prevents double-fire.
+    timer.Simple(20, function()
         if IsValid(self) then self:CrashExplode() end
     end)
 end
@@ -299,7 +350,7 @@ end
 function ENT:Debug(msg) print("[Bombin B-52] " .. tostring(msg)) end
 
 -- ============================================================
--- THINK / PHYSICS UPDATE
+-- THINK
 -- ============================================================
 function ENT:Think()
     if not self.DieTime or not self.SpawnTime then
@@ -307,12 +358,12 @@ function ENT:Think()
     end
     local ct = CurTime()
 
-    if self.IsTumbling and not self.TumbleCrashed then
-        local pos = self:GetPos()
-        if pos.z <= (self.TumbleGroundZ or -16384)+150 then self:CrashExplode() return end
-        local tr = util.TraceLine({start=pos, endpos=pos+Vector(0,0,-200), filter=self})
-        if tr.HitWorld then self:CrashExplode() return end
-        self:NextThink(ct+0.05) return true
+    if self.IsTumbling then
+        if not self.TumbleCrashed then
+            self:UpdateTumble(ct)
+        end
+        self:NextThink(ct + 0.015)
+        return true
     end
 
     if ct >= self.DieTime then self:Remove() return end
@@ -335,21 +386,11 @@ function ENT:Think()
 end
 
 function ENT:PhysicsUpdate(phys)
+    -- During tumble, movement is driven entirely by UpdateTumble in Think.
+    -- PhysicsUpdate must not touch position or angles during tumble.
+    if self.IsTumbling or self.IsDestroyed then return end
+
     if not self.DieTime or not self.sky then return end
-
-    if self.IsTumbling then
-        if self.TumbleCrashed then return end
-        local dt  = engine.TickInterval()
-        self.TumbleVelocity.z = self.TumbleVelocity.z + physenv.GetGravity().z * dt
-        local pos    = self:GetPos()
-        local newPos = pos + self.TumbleVelocity * dt
-        local av     = self.TumbleAngVelocity
-        self.ang = Angle(self.ang.p+av.x*dt, self.ang.y+av.y*dt, self.ang.r+av.z*dt)
-        self:SetPos(newPos) self:SetAngles(self.ang)
-        if IsValid(phys) then phys:SetPos(newPos) phys:SetAngles(self.ang) end
-        return
-    end
-
     if CurTime() >= self.DieTime then self:Remove() return end
 
     local pos = self:GetPos()
@@ -536,46 +577,18 @@ end
 -- ============================================================
 -- BOMB SAFETY HELPERS
 -- ============================================================
-
--- ApplyBombSafety: called immediately after every bomb/missile is spawned.
---
--- Three guarantees:
---   1. SELF-BOMB: CollisionGroup is set to COLLISION_GROUP_DEBRIS for
---      BOMB_ARM_DELAY seconds. This makes the bomb pass through ALL
---      entities (including the B-52 and other freshly-dropped bombs).
---      After the delay it is restored to COLLISION_GROUP_NONE so it can
---      hit the ground normally.
---
---   2. 1-SECOND ARM DELAY: Armed is forced false at spawn. The SW base
---      explodes on PhysicsCollide only when Armed == true, so the bomb
---      cannot detonate during the first second regardless of what it hits.
---      Armed is set to true after BOMB_ARM_DELAY seconds.
---
---   3. SKYBOX GUARD: A lightweight Think hook monitors the bomb's altitude.
---      If the bomb reaches (self.sky - SKYBOX_KILL_MARGIN) before arming,
---      OR if it ever exits the world (util.IsInWorld == false), it is
---      silently removed with no explosion.
---      After the bomb is armed and falling the guard keeps watching: if the
---      entity somehow climbs back toward the skybox (e.g. an explosion
---      impulse) and is not yet on the ground, it is removed cleanly.
---
 function ENT:ApplyBombSafety(bomb)
     if not IsValid(bomb) then return end
 
     local skyKillZ = self.sky - SKYBOX_KILL_MARGIN
     local armAt    = CurTime() + BOMB_ARM_DELAY
 
-    -- Step 1 & 2: disable collisions and block arming for BOMB_ARM_DELAY s
     bomb.Armed = false
     bomb:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
 
-    -- Step 3: install a per-tick skybox / OOB guard on the bomb entity
-    -- We override OnTick (SW base calls it every Think) if available,
-    -- otherwise we hook Think directly.
     local function skyGuard(b)
         if not IsValid(b) then return end
         local bpos = b:GetPos()
-        -- Out-of-world or hit skybox ceiling -> silently remove, no boom
         if not util.IsInWorld(bpos) or bpos.z >= skyKillZ then
             b:Remove()
             return
@@ -583,14 +596,12 @@ function ENT:ApplyBombSafety(bomb)
     end
 
     if bomb.OnTick then
-        -- SW base provides OnTick() called each server Think tick
         local origOnTick = bomb.OnTick
         bomb.OnTick = function(b)
             skyGuard(b)
             if IsValid(b) then origOnTick(b) end
         end
     else
-        -- Fallback: hook Think directly
         local origThink = bomb.Think
         bomb.Think = function(b)
             skyGuard(b)
@@ -598,7 +609,6 @@ function ENT:ApplyBombSafety(bomb)
         end
     end
 
-    -- After BOMB_ARM_DELAY: restore normal collision group and arm the bomb
     local ref = bomb
     timer.Simple(BOMB_ARM_DELAY, function()
         if not IsValid(ref) then return end
@@ -610,7 +620,6 @@ end
 -- ============================================================
 -- SHARED BOMB SPAWN HELPERS
 -- ============================================================
-
 local function CalcBallisticImpulse(dropPos, aimPos, aircraftFwdVel)
     local H        = math.max(dropPos.z - aimPos.z, 100)
     local fallTime = math.sqrt(2 * H / GRAVITY_EST)
@@ -668,7 +677,6 @@ function ENT:SpawnSWBomb(entClass, dropPos, aimPos, isRetarded)
         bomb:SetBodygroup(1, 1)
     end
 
-    -- Apply all three safety guarantees (collision delay, arm delay, skybox guard)
     self:ApplyBombSafety(bomb)
 
     local bPhys = bomb:GetPhysicsObject()
@@ -804,7 +812,6 @@ function ENT:UpdateHellfire(ct)
     missile:Spawn()
     missile:Activate()
 
-    -- Apply safety (collision delay + arm delay + skybox guard)
     self:ApplyBombSafety(missile)
 
     local mPhys = missile:GetPhysicsObject()
@@ -813,7 +820,6 @@ function ENT:UpdateHellfire(ct)
         mPhys:SetVelocity(fwd)
     end
 
-    -- After arm delay: activate guidance
     local mRef = missile
     timer.Simple(BOMB_ARM_DELAY + 0.05, function()
         if not IsValid(mRef) then return end
